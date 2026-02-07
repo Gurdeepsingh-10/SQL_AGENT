@@ -427,4 +427,3 @@ For issues and questions:
 
 ---
 
-**Built with ❤️ using FastAPI, SQLAlchemy, and OpenAI GPT**
