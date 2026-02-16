@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SQL Agent - Retro Mode</title>
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;700&family=Space+Mono:wght@400;700&display=swap"
+        rel="stylesheet">
+    <!-- Styles -->
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+
+<body>
+
+    <!-- Navbar -->
+    <nav class="navbar">
+        <div class="navbar-content">
+            <div class="navbar-brand" onclick="navigateTo('hero')">sql agent</div>
+            <div class="navbar-links">
+                <a href="#" class="nav-link" data-target="hero">home</a>
+                <a href="#" class="nav-link" data-target="app">playground</a>
+                <a href="#" class="nav-link" data-target="about">about</a>
+            </div>
+            <div class="navbar-actions">
+                <button id="logout-btn-nav" class="logout-btn-nav hidden">logout</button>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="theme-toggle">
+                    <span class="toggle-slider">
+                        <span class="toggle-icon toggle-icon-light">☀</span>
+                        <span class="toggle-icon toggle-icon-dark">☾</span>
+                    </span>
+                </label>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Auth Overlay -->
+    <div id="auth-overlay" class="auth-overlay">
+        <div class="card auth-box">
+            <h1>Login</h1>
+            <div id="auth-error" style="color: red; font-weight: bold; margin-bottom: 10px;"></div>
+            <form id="login-form">
+                <input type="text" id="username" placeholder="Username / Email" required>
+                <input type="password" id="password" placeholder="Password" required>
+                <div style="display: flex; gap: 10px;">
+                    <button type="submit">Enter System</button>
+                    <button type="button" class="secondary" id="show-register-btn">Register</button>
+                </div>
+            </form>
+
+            <form id="register-form" class="hidden">
+                <input type="email" id="reg-email" placeholder="Email" required>
+                <input type="text" id="reg-username" placeholder="Username" required>
+                <input type="password" id="reg-password" placeholder="Password" required>
+                <div style="display: flex; gap: 10px;">
+                    <button type="submit">Create User</button>
+                    <button type="button" class="secondary" id="show-login-btn">Back</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Hero Section -->
+    <section id="hero-section" class="section active">
+        <div class="hero-content">
+            <h1 class="hero-title">sql agent</h1>
+            <p class="hero-subtitle">natural language to sql interface</p>
+            <button class="hero-btn" onclick="navigateTo('app')">launch playground</button>
+        </div>
+        <!-- Footer removed from Hero as requested -->
+    </section>
+
+    <!-- About Section -->
+    <section id="about-section" class="section hidden">
+        <div class="about-container">
+            <div class="bento-grid">
+                <!-- 1. Primary Block: Summary -->
+                <div class="card bento-item summary-block">
+                    <h2>mission briefing</h2>
+                    <p>The <strong>SQL Agent</strong> is an advanced AI interface designed to democratize database
+                        interaction. By leveraging Large Language Models (LLMs) via Groq, it translates natural language
+                        questions into precise, optimized SQL queries.</p>
+                    <p style="margin-top: 15px;">It features a <strong>self-correcting mechanism</strong> that analyzes
+                        database schemas, validates generated SQL, and automatically fixes errors before execution.
+                        Wrapped in a retro-futurist "terminal" aesthetic, it brings the power of modern AI to the
+                        command line experience.</p>
+                </div>
+
+                <!-- 2. Usage Guide -->
+                <div class="card bento-item usage-block">
+                    <h2>operator manual</h2>
+                    <div class="step-list">
+                        <div class="step-item">
+                            <span class="step-num">01</span>
+                            <div class="step-text">
+                                <strong>Initialize:</strong> Launch the Playground and authenticate.
+                            </div>
+                        </div>
+                        <div class="step-item">
+                            <span class="step-num">02</span>
+                            <div class="step-text">
+                                <strong>Link Database:</strong> Input your PostgreSQL connection string (URI).
+                            </div>
+                        </div>
+                        <div class="step-item">
+                            <span class="step-num">03</span>
+                            <div class="step-text">
+                                <strong>Execute:</strong> Type natural language queries (e.g., "Show top selling items")
+                                or raw SQL.
+                            </div>
+                        </div>
+                        <div class="step-item">
+                            <span class="step-num">04</span>
+                            <div class="step-text">
+                                <strong>Analyze:</strong> Review the returned data and the agent's thought process.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 3. Tech Stack -->
+                <div class="card bento-item tech-block">
+                    <h2>system architecture</h2>
+                    <div class="tech-grid">
+                        <div class="tech-category">
+                            <h3>Core / AI</h3>
+                            <ul>
+                                <li><a href="https://docs.python.org/3/" target="_blank">Python 3.12+ ↗</a></li>
+                                <li><a href="https://langchain-ai.github.io/langgraph/" target="_blank">LangGraph
+                                        (Agentic Flow) ↗</a></li>
+                                <li><a href="https://python.langchain.com/docs/get_started/introduction"
+                                        target="_blank">LangChain (Orchestration) ↗</a></li>
+                                <li><a href="https://console.groq.com/docs/models" target="_blank">Groq (Llama 3
+                                        Inference) ↗</a></li>
+                            </ul>
+                        </div>
+                        <div class="tech-category">
+                            <h3>Backend / DB</h3>
+                            <ul>
+                                <li><a href="https://fastapi.tiangolo.com/" target="_blank">FastAPI (Async Server) ↗</a>
+                                </li>
+                                <li><a href="https://www.sqlalchemy.org/" target="_blank">SQLAlchemy (ORM) ↗</a></li>
+                                <li><a href="https://www.postgresql.org/docs/" target="_blank">PostgreSQL ↗</a></li>
+                                <li><a href="https://docs.pydantic.dev/" target="_blank">Pydantic (Validation) ↗</a>
+                                </li>
+                            </ul>
+                        </div>
+                        <div class="tech-category">
+                            <h3>Frontend</h3>
+                            <ul>
+                                <li><a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript"
+                                        target="_blank">Vanilla JS (ES6+) ↗</a></li>
+                                <li><a href="https://developer.mozilla.org/en-US/docs/Web/CSS" target="_blank">CSS3
+                                        (Grid/Flex/Vars) ↗</a></li>
+                                <li><a href="https://developer.mozilla.org/en-US/docs/Web/HTML" target="_blank">HTML5
+                                        (Semantic) ↗</a></li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card bento-item contrib-block">
+                    <h2>become an operative</h2>
+                    <p>sql agent is built on transparency. join our mission on github to refine the self-correcting
+                        engine, expand support for new architectures, and build the future of ai interfaces.</p>
+                    <a href="https://github.com/Gurdeepsingh-10/SQL_AGENT" target="_blank" rel="noopener noreferrer">
+                        <button style="width: 100%; margin-top: 15px;">contribute on github</button>
+                    </a>
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer (Only in About) -->
+        <footer class="footer">
+            <div class="footer-content">
+                <div class="footer-left">
+                    <div class="footer-brand">@deepdiedtrying</div>
+                    <div class="footer-tagline">built with langgraph & fastapi</div>
+                </div>
+                <div class="footer-right">
+                    <a href="https://github.com/Gurdeepsingh-10/SQL_AGENT" target="_blank"
+                        rel="noopener noreferrer">github</a>
+                    <a href="https://www.linkedin.com/in/gurdeep-singh-g10/" target="_blank"
+                        rel="noopener noreferrer">linkedin</a>
+                </div>
+            </div>
+        </footer>
+    </section>
+
+    <!-- Main Playground Section (formerly App) -->
+    <section id="app-section" class="section hidden">
+        <div id="dashboard" class="container">
+
+            <!-- Sidebar: Connections -->
+            <aside class="sidebar">
+                <div class="card">
+                    <h2>connections</h2>
+                    <div id="connection-list">
+                        <!-- Connections injected here -->
+                        <div class="connection-item">loading...</div>
+                    </div>
+                    <button id="add-connection-btn" style="width: 100%; margin-top: 20px;">+ add new</button>
+                </div>
+            </aside>
+
+            <!-- Main Content: Chat -->
+            <main class="main-content">
+                <div class="card chat-window">
+                    <div class="chat-header"
+                        style="border-bottom: 3px solid var(--border-color); margin-bottom: 10px; padding-bottom: 10px; display: flex; justify-content: space-between; align-items: center;">
+                        <h2 style="margin:0;">console</h2>
+                        <span id="current-connection-badge" class="badge">no connection</span>
+                    </div>
+
+                    <div id="chat-history" class="chat-history">
+                        <!-- Messages injected here -->
+                        <div class="message agent">
+                            <div class="message-content">System initialized. ready for input.</div>
+                        </div>
+                    </div>
+
+                    <div class="chat-input-area">
+                        <form id="chat-form" style="display: flex; gap: 10px;">
+                            <input type="text" id="chat-input"
+                                placeholder="enter sql command or natural language query..." autocomplete="off">
+                            <button type="submit">execute</button>
+                        </form>
+                    </div>
+                </div>
+            </main>
+
+        </div>
+    </section>
+
+    <!-- Modals (Simple override implementation) -->
+    <div id="connection-modal" class="auth-overlay hidden">
+        <div class="card auth-box">
+            <h2>add db connection</h2>
+            <form id="connection-form">
+                <input type="text" id="conn-name" placeholder="connection name (e.g. sales db)" required>
+                <input type="text" id="conn-url" placeholder="sqlalchemy url (postgresql://...)" required>
+                <div style="display: flex; gap: 10px;">
+                    <button type="submit">save</button>
+                    <button type="button" class="secondary" id="close-conn-modal">cancel</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+
+</html>
