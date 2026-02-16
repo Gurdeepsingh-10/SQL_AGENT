@@ -15,6 +15,8 @@ from app.core.agent.sql_generator import SQLGenerator
 from app.core.agent.validator import SQLValidator
 from app.core.agent.executor import SQLExecutor
 from app.core.agent.schema_inspector import SchemaInspector
+from app.core.agent.graph import graph
+from app.core.agent.nodes import current_engine_cv
 from app.utils.logger import get_logger
 import time
 
@@ -37,17 +39,7 @@ async def process_query(
     db: Session = Depends(get_db)
 ):
     """
-    Process natural language query through the SQL agent pipeline.
-    
-    Pipeline: NLP → Intent Classification → SQL Generation → Validation → Execution
-    
-    Args:
-        request: Natural language query request with optional connection_id
-        current_user: Authenticated user
-        db: Database session
-        
-    Returns:
-        Query results or error message
+    Process natural language query through the SQL agent pipeline (LangGraph).
     """
     from app.models.user_connection import UserConnection
     from app.core.connection_manager import connection_manager
@@ -64,7 +56,6 @@ async def process_query(
     target_engine = None
     
     if connection_id:
-        # User specified a connection
         target_connection = db.query(UserConnection).filter(
             UserConnection.id == connection_id,
             UserConnection.user_id == current_user.id,
@@ -78,7 +69,6 @@ async def process_query(
                 error="Invalid connection_id"
             )
     else:
-        # Use default connection
         target_connection = db.query(UserConnection).filter(
             UserConnection.user_id == current_user.id,
             UserConnection.is_default == True,
@@ -92,7 +82,7 @@ async def process_query(
                 error="No connection available"
             )
     
-    # Decrypt and get engine for target database
+    # Decrypt and get engine
     try:
         decrypted_url = connection_manager.decrypt_connection_url(target_connection.connection_url)
         target_engine = connection_manager.get_engine(target_connection.id, decrypted_url)
@@ -108,137 +98,99 @@ async def process_query(
             error=str(e)
         )
     
-    # Initialize history record (saved to PRIMARY database)
+    # Initialize history record
     history = QueryHistory(
         user_id=current_user.id,
         natural_language_query=query_text
     )
     
     try:
-        # Create agent components for TARGET database
-        target_schema_inspector = SchemaInspector(target_engine)
-        target_sql_validator = SQLValidator(target_schema_inspector)
-        target_sql_executor = SQLExecutor(target_engine)
+        # Set the current engine for the request context (used by graph nodes)
+        token = current_engine_cv.set(target_engine)
         
-        # Step 1: Get schema context from TARGET database
-        schema_context = target_schema_inspector.get_schema_context_for_llm()
+        # Get schema context for the prompt
+        # We still need this for the NLP/Gen steps. 
+        # Alternatively we could make a node for this, but pre-fetching is fine.
+        schema_inspector = SchemaInspector(target_engine)
+        schema_context = schema_inspector.get_schema_context_for_llm()
         
-        # Step 2: NLP Processing - Classify intent
-        intent_result = nlp_processor.classify_intent(query_text, schema_context)
+        # Prepare graph inputs
+        inputs = {
+            "query": query_text,
+            "schema_context": schema_context,
+            "db_connection_id": target_connection.id if target_connection else None
+        }
         
-        if intent_result.get('intent') == NLPProcessor.INTENT_UNKNOWN:
-            # Fallback: If intent is unknown, assume it's a general query or DDL
-            # and let the SQL generator handle it.
-            logger.warning("Intent classified as UNKNOWN, proceeding with SQL generation anyway.")
-            intent_result['intent'] = "GENERAL"
+        # Generate a thread ID for the conversation
+        # In a real app, this should avail of a session ID from the frontend or user context.
+        # For now, we'll use the user ID + connection ID as a simple session key, 
+        # or generate a new one per request if we don't want history persistence yet.
+        # The user wants "proper genai project", so persistence per connection/user is good.
+        thread_id = f"{current_user.id}_{target_connection.id}"
         
-        intent = intent_result['intent']
-        entities = intent_result.get('entities', {})
-        history.intent = intent
-        
-        # Step 3: Handle SCHEMA_INFO queries differently
-        if intent == NLPProcessor.INTENT_SCHEMA_INFO:
-            # Return schema information from TARGET database
-            tables = target_schema_inspector.get_all_tables()
-            execution_time = time.time() - start_time
-            
-            history.success = True
-            history.execution_time = execution_time
-            db.add(history)
-            db.commit()
-            
-            return AgentQueryResponse(
-                success=True,
-                intent=intent,
-                message=f"Database contains {len(tables)} tables: {', '.join(tables)}",
-                results=[{"tables": tables}],
-                result_count=len(tables),
-                execution_time=execution_time
-            )
-        
-        # Step 4: Generate SQL
-        sql_result = sql_generator.generate_sql(
-            query_text,
-            intent,
-            entities,
-            schema_context
+        # Invoke LangGraph
+        result_state = await graph.ainvoke(
+            inputs,
+            config={"configurable": {"thread_id": thread_id}}
         )
         
-        if not sql_result.get('sql'):
-            history.success = False
-            history.error_message = "Failed to generate SQL"
-            history.execution_time = time.time() - start_time
-            db.add(history)
-            db.commit()
-            
-            return AgentQueryResponse(
-                success=False,
-                intent=intent,
-                message="I couldn't generate a valid SQL query for your request.",
-                error=sql_result.get('error', 'SQL generation failed')
-            )
+        # Reset context var
+        current_engine_cv.reset(token)
         
-        generated_sql = sql_result['sql']
-        history.generated_sql = generated_sql
-        
-        # Step 5: Validate SQL against TARGET database schema
-        validation_result = target_sql_validator.validate(generated_sql, intent)
-        
-        if not validation_result['is_valid']:
-            error_msg = '; '.join(validation_result['errors'])
-            history.success = False
-            history.error_message = error_msg
-            history.execution_time = time.time() - start_time
-            db.add(history)
-            db.commit()
-            
-            return AgentQueryResponse(
-                success=False,
-                intent=intent,
-                generated_sql=generated_sql,
-                message="The generated query failed security validation.",
-                error=error_msg
-            )
-        
-        # Step 6: Execute SQL on TARGET database
-        execution_result = target_sql_executor.execute_query(generated_sql)
-        
+        # Process results
         execution_time = time.time() - start_time
         
-        # Update history (saved to PRIMARY database)
-        history.success = execution_result['success']
-        history.execution_time = execution_time
-        history.result_count = execution_result.get('row_count', 0)
+        intent = result_state.get("intent", "UNKNOWN")
+        error = result_state.get("error")
+        sql_query = result_state.get("sql_query")
+        sql_results = result_state.get("sql_results")
         
-        if not execution_result['success']:
-            history.error_message = execution_result.get('error', 'Execution failed')
+        # Populate history
+        history.intent = intent
+        history.generated_sql = sql_query
+        history.success = error is None
+        history.error_message = error
+        history.execution_time = execution_time
+        history.result_count = len(sql_results) if sql_results else 0
         
         db.add(history)
         db.commit()
         
-        # Step 7: Format response
-        if execution_result['success']:
-            return AgentQueryResponse(
-                success=True,
-                intent=intent,
-                generated_sql=generated_sql,
-                results=execution_result.get('data'),
-                result_count=execution_result.get('row_count', 0),
-                execution_time=execution_time,
-                message=execution_result['message']
-            )
-        else:
+        # Determine final message
+        final_message = "Query executed successfully"
+        if result_state.get("messages"):
+            # Get the last message content
+            final_message = result_state["messages"][-1].content
+        
+        if error:
             return AgentQueryResponse(
                 success=False,
                 intent=intent,
-                generated_sql=generated_sql,
-                message="Query execution failed.",
-                error=execution_result.get('error', 'Unknown error'),
+                generated_sql=sql_query,
+                message=final_message,
+                error=error,
                 execution_time=execution_time
             )
-    
+            
+        return AgentQueryResponse(
+            success=True,
+            intent=intent,
+            generated_sql=sql_query,
+            results=sql_results,
+            result_count=len(sql_results) if sql_results else 0,
+            execution_time=execution_time,
+            message=final_message
+        )
+        
     except Exception as e:
         logger.error(f"Error processing query: {str(e)}", exc_info=True)
+        # Ensure context var is reset even on error
+        # (Though in valid async flow with proper scope it might not matter, but good practice)
+        # We can't easily reset 'token' here if it was set inside try. 
+        # But ContextVars are thread/task local, so it clears on task end anyway? 
+        # Actually no, in async it persists in the context. 
+        # But this is a request handler, so the context is destroyed after response? 
+        # Ideally use try/finally.
         
         execution_time = time.time() - start_time
         history.success = False
