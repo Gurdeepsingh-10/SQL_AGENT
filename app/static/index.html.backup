@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SQL Agent - Retro Mode</title>
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;700&family=Space+Mono:wght@400;700&display=swap"
+        rel="stylesheet">
+    <!-- Styles -->
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+
+<body>
+
+    <!-- Navbar -->
+    <nav class="navbar">
+        <div class="navbar-content">
+            <div class="navbar-brand">SQL AGENT</div>
+            <div class="navbar-actions">
+                <button id="theme-toggle" class="theme-toggle" title="Toggle dark mode">
+                    <span class="theme-icon">☀️</span>
+                </button>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Auth Overlay -->
+    <div id="auth-overlay" class="auth-overlay">
+        <div class="card auth-box">
+            <h1>Login</h1>
+            <div id="auth-error" style="color: red; font-weight: bold; margin-bottom: 10px;"></div>
+            <form id="login-form">
+                <input type="text" id="username" placeholder="Username / Email" required>
+                <input type="password" id="password" placeholder="Password" required>
+                <div style="display: flex; gap: 10px;">
+                    <button type="submit">Enter System</button>
+                    <button type="button" class="secondary" id="show-register-btn">Register</button>
+                </div>
+            </form>
+
+            <form id="register-form" class="hidden">
+                <input type="email" id="reg-email" placeholder="Email" required>
+                <input type="text" id="reg-username" placeholder="Username" required>
+                <input type="password" id="reg-password" placeholder="Password" required>
+                <div style="display: flex; gap: 10px;">
+                    <button type="submit">Create User</button>
+                    <button type="button" class="secondary" id="show-login-btn">Back</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Main Dashboard -->
+    <div id="dashboard" class="container hidden">
+
+        <!-- Sidebar: Connections -->
+        <aside class="sidebar">
+            <div class="card">
+                <h2>Connections</h2>
+                <div id="connection-list">
+                    <!-- Connections injected here -->
+                    <div class="connection-item">Loading...</div>
+                </div>
+                <button id="add-connection-btn" style="width: 100%; margin-top: 20px;">+ Add New</button>
+            </div>
+
+            <div class="card">
+                <h3>User</h3>
+                <p id="user-display">Guest</p>
+                <button id="logout-btn" class="secondary" style="width: 100%;">Log Out</button>
+            </div>
+        </aside>
+
+        <!-- Main Content: Chat -->
+        <main class="main-content">
+            <div class="card chat-window">
+                <div class="chat-header"
+                    style="border-bottom: 3px solid black; margin-bottom: 10px; padding-bottom: 10px; display: flex; justify-content: space-between; align-items: center;">
+                    <h2 style="margin:0;">Console</h2>
+                    <span id="current-connection-badge" class="badge">No Connection</span>
+                </div>
+
+                <div id="chat-history" class="chat-history">
+                    <!-- Messages injected here -->
+                    <div class="message agent">
+                        <div class="message-content">System initialized. Ready for input.</div>
+                    </div>
+                </div>
+
+                <div class="chat-input-area">
+                    <form id="chat-form" style="display: flex; gap: 10px;">
+                        <input type="text" id="chat-input" placeholder="Enter SQL command or natural language query..."
+                            autocomplete="off">
+                        <button type="submit">Execute</button>
+                    </form>
+                </div>
+            </div>
+        </main>
+
+    </div>
+
+    <!-- Modals (Simple override implementation) -->
+    <div id="connection-modal" class="auth-overlay hidden">
+        <div class="card auth-box">
+            <h2>Add DB Connection</h2>
+            <form id="connection-form">
+                <input type="text" id="conn-name" placeholder="Connection Name (e.g. Sales DB)" required>
+                <input type="text" id="conn-url" placeholder="SQLAlchemy URL (postgresql://...)" required>
+                <div style="display: flex; gap: 10px;">
+                    <button type="submit">Save</button>
+                    <button type="button" class="secondary" id="close-conn-modal">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+
+</html>
