@@ -17,3 +17,7 @@ python-dotenv>=1.0.1
 email-validator>=2.0.0
 bcrypt==3.2.2
 cryptography>=41.0.0
+sqlparse>=0.4.4
+langgraph>=0.0.10
+langchain-groq>=0.0.1
+langchain_community>=0.0.10
