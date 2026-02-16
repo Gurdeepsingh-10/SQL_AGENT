@@ -42,7 +42,16 @@ class ConnectionManager:
             (success: bool, error_message: Optional[str])
         """
         try:
-            engine = create_engine(connection_url, pool_pre_ping=True)
+            # Add connection timeout for Postgres
+            connect_args = {}
+            if "postgresql" in connection_url:
+                connect_args["connect_timeout"] = 10
+            
+            engine = create_engine(
+                connection_url, 
+                pool_pre_ping=True,
+                connect_args=connect_args
+            )
             with engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
             engine.dispose()
