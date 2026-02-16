@@ -217,32 +217,43 @@ class SQLExecutor:
             Formatted string for display
         """
         if not results['success']:
-            return f"❌ Query failed: {results.get('error', 'Unknown error')}"
+            return f"Hmm, ran into an issue: {results.get('error', 'Unknown error')}"
         
         if results['data'] is None:
             # Non-SELECT query
-            return f"✅ {results['message']}"
+            row_count = results.get('row_count', 0)
+            if row_count == 0:
+                return "Done! The operation completed successfully."
+            elif row_count == 1:
+                return "Alright, updated 1 row."
+            else:
+                return f"Alright, affected {row_count} rows."
         
         # SELECT query with data
         row_count = results['row_count']
         
         if row_count == 0:
-            return "✅ Query executed successfully, but no results found."
+            return "Query ran fine, but didn't find any matching records."
         
         # Format first few rows as preview
         data = results['data']
         preview_count = min(5, row_count)
         
-        formatted = f"✅ Found {row_count} result(s)\n\n"
+        if row_count == 1:
+            formatted = "Found 1 result:\n\n"
+        else:
+            formatted = f"Found {row_count} results.\n\n"
         
         if row_count > 0:
-            formatted += "Preview (first 5 rows):\n"
+            if row_count > preview_count:
+                formatted += f"Here are the first {preview_count}:\n"
+            
             for i, row in enumerate(data[:preview_count], 1):
                 formatted += f"\nRow {i}:\n"
                 for key, value in row.items():
                     formatted += f"  {key}: {value}\n"
         
         if row_count > preview_count:
-            formatted += f"\n... and {row_count - preview_count} more row(s)"
+            formatted += f"\n... plus {row_count - preview_count} more"
         
         return formatted
