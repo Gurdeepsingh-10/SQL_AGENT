@@ -3,6 +3,8 @@ Main FastAPI application entry point.
 """
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import init_db
@@ -33,6 +35,13 @@ app.include_router(auth.router)
 app.include_router(agent.router)
 app.include_router(database.router)
 app.include_router(connections.router)  # Already has /connections prefix
+
+# Mount static files
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
+
+@app.get("/")
+async def read_index():
+    return FileResponse('app/static/index.html')
 
 
 @app.on_event("startup")
@@ -66,16 +75,12 @@ async def shutdown_event():
     logger.info("Shutting down AI SQL Agent application...")
 
 
-@app.get("/", tags=["Root"])
-async def root():
-    """
-    Root endpoint - API health check.
-    """
     return {
         "message": "AI SQL Agent API",
         "version": "1.0.0",
         "status": "running",
-        "docs": "/docs"
+        "docs": "/docs",
+        "frontend": "/"
     }
 
 
