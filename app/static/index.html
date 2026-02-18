@@ -59,21 +59,223 @@
                 <input type="password" id="reg-password" placeholder="Password" required>
                 <div style="display: flex; gap: 10px;">
                     <button type="submit">Create User</button>
-                    <button type="button" class="secondary" id="show-login-btn">Back</button>
+                    <button type="button" class="secondary" id="show-login-btn">Login</button>
                 </div>
             </form>
         </div>
     </div>
 
-    <!-- Hero Section -->
+    <!-- ═══════════════════════════════════════
+         HERO SECTION
+    ════════════════════════════════════════ -->
     <section id="hero-section" class="section active">
-        <div class="hero-content">
-            <h1 class="hero-title">sql agent</h1>
-            <p class="hero-subtitle">natural language to sql interface</p>
-            <button class="hero-btn" onclick="navigateTo('app')">launch playground</button>
+
+        <!-- Dot-grid background -->
+        <div class="hero-bg-grid"></div>
+
+        <!-- Scrolling ticker -->
+        <div class="hero-ticker">
+            <div class="ticker-track">
+                <span>natural language → sql</span>
+                <span class="ticker-dot">✦</span>
+                <span>llama 3 · groq inference</span>
+                <span class="ticker-dot">✦</span>
+                <span>self-correcting agent</span>
+                <span class="ticker-dot">✦</span>
+                <span>postgresql ready</span>
+                <span class="ticker-dot">✦</span>
+                <span>langgraph · fastapi</span>
+                <span class="ticker-dot">✦</span>
+                <span>encrypted connections</span>
+                <span class="ticker-dot">✦</span>
+                <span>natural language → sql</span>
+                <span class="ticker-dot">✦</span>
+                <span>llama 3 · groq inference</span>
+                <span class="ticker-dot">✦</span>
+                <span>self-correcting agent</span>
+                <span class="ticker-dot">✦</span>
+                <span>postgresql ready</span>
+                <span class="ticker-dot">✦</span>
+                <span>langgraph · fastapi</span>
+                <span class="ticker-dot">✦</span>
+                <span>encrypted connections</span>
+                <span class="ticker-dot">✦</span>
+            </div>
         </div>
-        <!-- Footer removed from Hero as requested -->
+
+        <!-- Main hero content: two-column grid -->
+        <div class="hero-content">
+
+            <!-- ── LEFT: title + CTA + stats ── -->
+            <div class="hero-left">
+
+                <div class="hero-eyebrow">
+                    <span class="eyebrow-pill">v1.0 — live</span>
+                    <span class="eyebrow-status">
+                        <span class="status-dot"></span>system online
+                    </span>
+                </div>
+
+                <h1 class="hero-title">sql<br>agent</h1>
+
+                <p class="hero-subtitle">
+                    ask your database anything.<br>
+                    get answers, not queries.
+                </p>
+
+                <div class="hero-actions">
+                    <button class="hero-btn" onclick="navigateTo('app')">launch playground →</button>
+                    <a href="#" class="hero-link-btn" onclick="navigateTo('about'); return false;">how it works</a>
+                </div>
+
+                <!-- Stats strip -->
+                <div class="hero-stats">
+                    <div class="hero-stat">
+                        <span class="stat-num">3</span>
+                        <span class="stat-label">agent nodes</span>
+                    </div>
+                    <div class="hero-stat-divider"></div>
+                    <div class="hero-stat">
+                        <span class="stat-num">70b</span>
+                        <span class="stat-label">llm parameters</span>
+                    </div>
+                    <div class="hero-stat-divider"></div>
+                    <div class="hero-stat">
+                        <span class="stat-num">0</span>
+                        <span class="stat-label">sql knowledge needed</span>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- ── RIGHT: live terminal demo ── -->
+            <div class="hero-right">
+
+                <div class="hero-terminal card">
+                    <div class="terminal-topbar">
+                        <div class="terminal-dots">
+                            <span class="t-dot t-dot-red"></span>
+                            <span class="t-dot t-dot-yellow"></span>
+                            <span class="t-dot t-dot-green"></span>
+                        </div>
+                        <span class="terminal-label">agent console — live demo</span>
+                    </div>
+
+                    <div class="terminal-body">
+                        <!-- User query line -->
+                        <div class="t-line t-line-user">
+                            <span class="t-prompt">&gt;</span>
+                            <span class="t-text" id="demo-query"></span>
+                            <span class="t-cursor" id="demo-cursor">█</span>
+                        </div>
+
+                        <!-- Agent response (shown after typing) -->
+                        <div class="t-response hidden" id="demo-response">
+                            <div class="t-line t-line-agent">
+                                <span class="t-label">[intent]</span>
+                                <span class="t-val t-green">SELECT · data_retrieval</span>
+                            </div>
+                            <div class="t-line t-line-agent">
+                                <span class="t-label">[sql]</span>
+                            </div>
+                            <div class="t-code">
+                                <pre id="demo-sql"></pre>
+                            </div>
+                            <div class="t-line t-line-agent">
+                                <span class="t-label">[result]</span>
+                                <span class="t-val t-green" id="demo-result-label">✓ 5 rows returned</span>
+                            </div>
+                            <div class="t-table-wrap">
+                                <table class="t-table">
+                                    <thead>
+                                        <tr>
+                                            <th>product</th>
+                                            <th>revenue</th>
+                                            <th>units</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr>
+                                            <td>widget pro</td>
+                                            <td>$48,200</td>
+                                            <td>241</td>
+                                        </tr>
+                                        <tr>
+                                            <td>core kit</td>
+                                            <td>$31,800</td>
+                                            <td>318</td>
+                                        </tr>
+                                        <tr>
+                                            <td>starter pack</td>
+                                            <td>$22,100</td>
+                                            <td>442</td>
+                                        </tr>
+                                        <tr>
+                                            <td>enterprise</td>
+                                            <td>$19,500</td>
+                                            <td>13</td>
+                                        </tr>
+                                        <tr>
+                                            <td>addon bundle</td>
+                                            <td>$14,900</td>
+                                            <td>298</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Feature chips -->
+                <div class="hero-chips">
+                    <span class="chip">⚡ groq inference</span>
+                    <span class="chip">🔒 encrypted at rest</span>
+                    <span class="chip">🔁 self-correcting</span>
+                    <span class="chip">🗄 cross sql compatibility</span>
+                </div>
+
+            </div>
+
+        </div>
+
+        <!-- ── Bottom feature strip ── -->
+        <div class="hero-feature-strip">
+            <div class="feature-item">
+                <span class="feature-num">01</span>
+                <div class="feature-text">
+                    <strong>connect</strong>
+                    <span>paste your postgresql uri</span>
+                </div>
+            </div>
+            <div class="feature-divider"></div>
+            <div class="feature-item">
+                <span class="feature-num">02</span>
+                <div class="feature-text">
+                    <strong>ask</strong>
+                    <span>type in plain english</span>
+                </div>
+            </div>
+            <div class="feature-divider"></div>
+            <div class="feature-item">
+                <span class="feature-num">03</span>
+                <div class="feature-text">
+                    <strong>execute</strong>
+                    <span>agent writes & runs the sql</span>
+                </div>
+            </div>
+            <div class="feature-divider"></div>
+            <div class="feature-item">
+                <span class="feature-num">04</span>
+                <div class="feature-text">
+                    <strong>analyze</strong>
+                    <span>review results & agent log</span>
+                </div>
+            </div>
+        </div>
+
     </section>
+    <!-- end #hero-section -->
 
     <!-- About Section -->
     <section id="about-section" class="section hidden">
@@ -192,7 +394,7 @@
         </footer>
     </section>
 
-    <!-- Main Playground Section (formerly App) -->
+    <!-- Main Playground Section -->
     <section id="app-section" class="section hidden">
         <div id="dashboard" class="container">
 
@@ -201,7 +403,6 @@
                 <div class="card">
                     <h2>connections</h2>
                     <div id="connection-list">
-                        <!-- Connections injected here -->
                         <div class="connection-item">loading...</div>
                     </div>
                     <button id="add-connection-btn" style="width: 100%; margin-top: 20px;">+ add new</button>
@@ -218,7 +419,6 @@
                     </div>
 
                     <div id="chat-history" class="chat-history">
-                        <!-- Messages injected here -->
                         <div class="message agent">
                             <div class="message-content">System initialized. ready for input.</div>
                         </div>
@@ -237,7 +437,7 @@
         </div>
     </section>
 
-    <!-- Modals (Simple override implementation) -->
+    <!-- Connection Modal -->
     <div id="connection-modal" class="auth-overlay hidden">
         <div class="card auth-box">
             <h2>add db connection</h2>
