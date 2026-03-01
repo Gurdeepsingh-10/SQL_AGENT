@@ -4,7 +4,7 @@ Database introspection routes for schema information.
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from app.database import get_db, engine
+from app.database import get_db
 from app.schemas.database import TableListResponse, SchemaResponse, TableSchema, ColumnInfo
 from app.models.user import User
 from app.api.deps import get_current_user
@@ -14,9 +14,6 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/db", tags=["Database"])
-
-# Initialize schema inspector
-schema_inspector = SchemaInspector(engine)
 
 
 @router.get("/tables", response_model=TableListResponse)
@@ -35,7 +32,9 @@ async def get_tables(
         List of table names
     """
     try:
-        tables = schema_inspector.get_all_tables()
+        bound_engine = db.get_bind()
+        inspector = SchemaInspector(bound_engine)
+        tables = inspector.get_all_tables()
         
         logger.info(f"User {current_user.email} requested table list: {len(tables)} tables")
         
@@ -70,15 +69,17 @@ async def get_table_schema(
         Table schema with columns and metadata
     """
     try:
+        bound_engine = db.get_bind()
+        inspector = SchemaInspector(bound_engine)
         # Check if table exists
-        if not schema_inspector.validate_table_exists(table_name):
+        if not inspector.validate_table_exists(table_name):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Table '{table_name}' not found"
             )
         
         # Get schema
-        schema_data = schema_inspector.get_table_schema(table_name)
+        schema_data = inspector.get_table_schema(table_name)
         
         # Convert to Pydantic model
         columns = [ColumnInfo(**col) for col in schema_data['columns']]
@@ -119,10 +120,10 @@ async def refresh_schema_cache(
         Success message
     """
     try:
-        schema_inspector.clear_cache()
-        
-        # Rebuild cache
-        schema_inspector.get_full_schema()
+        bound_engine = db.get_bind()
+        inspector = SchemaInspector(bound_engine)
+        inspector.clear_cache()
+        inspector.get_full_schema()
         
         logger.info(f"User {current_user.email} refreshed schema cache")
         

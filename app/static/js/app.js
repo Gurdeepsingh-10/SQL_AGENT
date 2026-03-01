@@ -100,7 +100,11 @@ function initHeroDemo() {
 // ============================================================
 let currentUser = null;
 let token = localStorage.getItem("sql_agent_token");
-let currentConnectionId = null;
+// Restore the last-used connection ID from localStorage so it survives page refreshes
+let currentConnectionId = (() => {
+    const saved = localStorage.getItem("sql_agent_connection_id");
+    return saved ? parseInt(saved, 10) : null;
+})();
 
 // DOM Elements
 const authOverlay = document.getElementById("auth-overlay");
@@ -170,6 +174,8 @@ document.addEventListener("DOMContentLoaded", () => {
         logoutBtnNav.addEventListener("click", () => {
             token = null;
             localStorage.removeItem("sql_agent_token");
+            // Also clear the saved connection so the next user starts fresh
+            localStorage.removeItem("sql_agent_connection_id");
             location.reload();
         });
     }
@@ -181,6 +187,11 @@ document.addEventListener("DOMContentLoaded", () => {
     if (token) {
         const logoutNav = document.getElementById("logout-btn-nav");
         if (logoutNav) logoutNav.classList.remove("hidden");
+        // Show a loading indicator in the badge while connections are being fetched
+        if (currentConnectionBadge && currentConnectionId) {
+            currentConnectionBadge.textContent = "LOADING...";
+        }
+        // Fetch connections from the backend — this will auto-restore the saved selection
         fetchConnections();
         navigateTo('hero');
     } else {
@@ -318,7 +329,25 @@ function renderConnections(connections) {
 
     if (activeConnections.length === 0) {
         connectionList.innerHTML = "<div class='connection-item'>No connections</div>";
+        // Clear stale saved connection if it no longer exists
+        localStorage.removeItem("sql_agent_connection_id");
+        currentConnectionId = null;
+        if (currentConnectionBadge) currentConnectionBadge.textContent = "NO CONNECTION";
         return;
+    }
+
+    // Determine which connection to auto-select:
+    // Priority 1: the saved connection ID from localStorage (survives refresh)
+    // Priority 2: the connection marked as default
+    // Priority 3: the first active connection
+    let connectionToSelect = null;
+
+    if (currentConnectionId) {
+        // Verify the saved connection still exists and is active
+        connectionToSelect = activeConnections.find(c => c.id === currentConnectionId) || null;
+    }
+    if (!connectionToSelect) {
+        connectionToSelect = activeConnections.find(c => c.is_default) || activeConnections[0];
     }
 
     activeConnections.forEach(conn => {
@@ -342,14 +371,20 @@ function renderConnections(connections) {
             }
         });
 
-        if (currentConnectionId === conn.id) {
-            div.classList.add("active");
-        } else if (!currentConnectionId && conn.is_default) {
-            selectConnection(conn);
-        }
-
         connectionList.appendChild(div);
     });
+
+    // Auto-select silently (no chat message) — this is a restore, not a user action
+    if (connectionToSelect) {
+        selectConnection(connectionToSelect, true);
+        // Mark the active item in the list
+        Array.from(connectionList.children).forEach(child => {
+            const nameEl = child.querySelector && child.querySelector(".conn-info span");
+            if (nameEl && nameEl.textContent === connectionToSelect.connection_name) {
+                child.classList.add("active");
+            }
+        });
+    }
 }
 
 async function deleteConnection(connectionId) {
@@ -360,11 +395,13 @@ async function deleteConnection(connectionId) {
         });
 
         if (response.ok) {
-            fetchConnections();
             if (currentConnectionId === connectionId) {
                 currentConnectionId = null;
-                currentConnectionBadge.textContent = "NO CONNECTION";
+                // Clear the persisted selection since this connection is gone
+                localStorage.removeItem("sql_agent_connection_id");
+                if (currentConnectionBadge) currentConnectionBadge.textContent = "NO CONNECTION";
             }
+            fetchConnections();
         } else {
             alert("Failed to delete connection");
         }
@@ -374,18 +411,30 @@ async function deleteConnection(connectionId) {
     }
 }
 
-function selectConnection(conn) {
+function selectConnection(conn, silent = false) {
     currentConnectionId = conn.id;
-    currentConnectionBadge.textContent = conn.connection_name;
+    // Persist the selected connection ID so it survives page refreshes
+    localStorage.setItem("sql_agent_connection_id", conn.id);
+
+    if (currentConnectionBadge) {
+        currentConnectionBadge.textContent = conn.connection_name;
+    }
 
     Array.from(connectionList.children).forEach(child => {
         child.classList.remove("active");
-        if (child.textContent.includes(conn.connection_name)) {
-            child.classList.add("active");
+        if (child.querySelector && child.querySelector(".conn-info")) {
+            const nameEl = child.querySelector(".conn-info span");
+            if (nameEl && nameEl.textContent === conn.connection_name) {
+                child.classList.add("active");
+            }
         }
     });
 
-    addMessage("agent", `Switched to connection: ${conn.connection_name}`);
+    // Only show the "switched" message when the user explicitly clicks,
+    // not when auto-restoring on page load
+    if (!silent) {
+        addMessage("agent", `Switched to connection: ${conn.connection_name}`);
+    }
 }
 
 addConnectionBtn.addEventListener("click", () => {

@@ -73,6 +73,14 @@ async def shutdown_event():
     Cleanup resources.
     """
     logger.info("Shutting down AI SQL Agent application...")
+    try:
+        from app.database import engine
+        from app.core.connection_manager import connection_manager
+        connection_manager.close_all_connections()
+        engine.dispose()
+        logger.info("Database engines disposed")
+    except Exception as e:
+        logger.error(f"Error during shutdown cleanup: {str(e)}")
 
 
     return {
