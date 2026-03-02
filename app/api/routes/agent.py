@@ -5,18 +5,14 @@ SQL Agent routes for natural language query processing.
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
-from app.database import get_db, engine
+from app.database import get_db
 from app.schemas.agent import AgentQueryRequest, AgentQueryResponse, QueryHistoryResponse, QueryHistoryItem
 from app.models.user import User
 from app.models.query_history import QueryHistory
 from app.api.deps import get_current_user
-from app.core.agent.nlp_processor import NLPProcessor
-from app.core.agent.sql_generator import SQLGenerator
-from app.core.agent.validator import SQLValidator
-from app.core.agent.executor import SQLExecutor
 from app.core.agent.schema_inspector import SchemaInspector
 from app.core.agent.graph import graph, get_thread_id, reset_session, get_user_session_status
-from app.core.agent.nodes import current_engine_cv
+from app.core.agent.nodes import current_engine_cv, _get_cached_inspector
 from app.utils.logger import get_logger
 import time
 
@@ -24,12 +20,8 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/agent", tags=["SQL Agent"])
 
-# Initialize agent components
-nlp_processor = NLPProcessor()
-sql_generator = SQLGenerator()
-schema_inspector = SchemaInspector(engine)
-sql_validator = SQLValidator(schema_inspector)
-sql_executor = SQLExecutor(engine)
+# Note: NLPProcessor, SQLGenerator, SchemaInspector, SQLValidator, SQLExecutor
+# are instantiated as global singletons in nodes.py and reused across all requests.
 
 
 @router.post("/query", response_model=AgentQueryResponse)
@@ -118,9 +110,10 @@ async def process_query(
             schema_context = cached_snapshot.schema_context
             logger.info(f"Using cached schema snapshot for connection {connection_id}")
         else:
-            schema_inspector = SchemaInspector(target_engine)
+            # Use cached inspector — same object reused by validate_sql, avoids double schema fetch
+            schema_inspector = _get_cached_inspector(target_engine)
             schema_context = schema_inspector.get_schema_context_for_llm()
-            # Cache it
+            # Cache it in memory manager for future requests
             if connection_id:
                 memory_manager.store_schema_snapshot(
                     connection_id=connection_id,
@@ -361,4 +354,40 @@ async def memory_status(
     return {
         "success": True,
         "sessions": status_map
+    }
+
+
+@router.get("/cache/stats")
+async def cache_stats(
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Return in-memory cache statistics for NLP intent classification and SQL generation.
+    Useful for monitoring cache effectiveness and latency optimisation impact.
+    """
+    from app.core.agent.nlp_processor import (
+        _INTENT_CACHE, _CACHE_HITS, _CACHE_MISSES, _INTENT_CACHE_MAX
+    )
+    from app.core.agent.sql_generator import _SQL_CACHE, _SQL_CACHE_MAX
+    from app.core.agent.nodes import _inspector_cache, _validator_cache
+
+    total_nlp = _CACHE_HITS + _CACHE_MISSES
+    hit_rate = round(_CACHE_HITS / total_nlp * 100, 1) if total_nlp > 0 else 0.0
+
+    return {
+        "success": True,
+        "intent_cache": {
+            "size": len(_INTENT_CACHE),
+            "max": _INTENT_CACHE_MAX,
+            "hits": _CACHE_HITS,
+            "misses": _CACHE_MISSES,
+            "hit_rate_pct": hit_rate,
+        },
+        "sql_cache": {
+            "size": len(_SQL_CACHE),
+            "max": _SQL_CACHE_MAX,
+        },
+        "inspector_cache": {
+            "engines_cached": len(_inspector_cache),
+        },
     }
