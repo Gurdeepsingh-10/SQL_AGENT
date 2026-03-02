@@ -35,6 +35,10 @@ _TRANSIENT_ERROR_PATTERNS = [
     "operational error",
     "timeout",
     "temporarily unavailable",
+    "the database system is starting up",
+    "recovery in progress",
+    "ssl connection has been closed unexpectedly",
+    "terminating connection due to idle",
 ]
 
 # Permanent errors that should not be retried
@@ -75,6 +79,9 @@ def _classify_error(error_message: str) -> str:
 
     if any(p in msg_lower for p in ["permission denied", "access denied"]):
         return "permission"
+
+    if any(p in msg_lower for p in ["unique constraint", "duplicate key", "foreign key constraint", "check constraint"]):
+        return "integrity"
 
     return "permanent"
 
@@ -214,6 +221,29 @@ class SQLExecutor:
                     row_count = result.rowcount
                     execution_time = time.time() - start_time
 
+                    # Detect DDL — DDL returns rowcount=-1 on most databases
+                    is_ddl = any(
+                        sql_upper.startswith(kw)
+                        for kw in ("CREATE", "ALTER", "DROP", "TRUNCATE", "RENAME")
+                    )
+
+                    if is_ddl:
+                        logger.info(
+                            f"[SQLExecutor] DDL executed successfully in {execution_time:.3f}s"
+                        )
+                        return {
+                            "success": True,
+                            "data": None,
+                            "row_count": -1,  # DDL convention
+                            "is_ddl": True,
+                            "columns": [],
+                            "execution_time": execution_time,
+                            "truncated": False,
+                            "error": None,
+                            "error_type": None,
+                            "message": "DDL statement executed successfully",
+                        }
+
                     logger.info(
                         f"[SQLExecutor] DML affected {row_count} rows "
                         f"in {execution_time:.3f}s"
@@ -223,6 +253,7 @@ class SQLExecutor:
                         "success": True,
                         "data": None,
                         "row_count": row_count,
+                        "is_ddl": False,
                         "columns": [],
                         "execution_time": execution_time,
                         "truncated": False,
@@ -316,50 +347,60 @@ class SQLExecutor:
     # ------------------------------------------------------------------
 
     def format_results_for_user(self, results: Dict[str, Any]) -> str:
-        """Format query results in a user-friendly way."""
+        """Format query results into a clean, intelligent summary.
+
+        The frontend renders the full table separately, so this message
+        should be a concise, human-readable headline — NOT a row-by-row dump.
+        """
         if not results["success"]:
             error_type = results.get("error_type", "")
-            error = results.get("error", "Unknown error")
             if error_type == "schema":
-                return (
-                    f"The query referenced a table or column that doesn't exist: {error}"
-                )
+                return "The query referenced a table or column that doesn't exist. Please check the schema and try again."
             elif error_type == "permission":
-                return f"Permission denied: {error}"
+                return "Permission denied. I am not allowed to perform this operation."
+            elif error_type == "integrity":
+                return "This operation would violate a database constraint (e.g., a record with this ID or name already exists)."
             elif error_type == "transient":
-                return f"A temporary database error occurred: {error}"
-            return f"Query failed: {error}"
+                return "A temporary database error occurred. Please try again."
+            return "I encountered a database error while executing the query."
 
+        # ── DML / DDL success ────────────────────────────────────────────────
         if results["data"] is None:
+            if results.get("is_ddl"):
+                return "✅ Done! The operation completed successfully."
             row_count = results.get("row_count", 0)
-            if row_count == 0:
-                return "Done! The operation completed successfully."
+            if row_count <= 0:
+                return "✅ Done! The operation completed successfully."
             elif row_count == 1:
-                return "Updated 1 row."
-            return f"Affected {row_count} rows."
+                return "✅ 1 row affected."
+            return f"✅ Affected {row_count} rows."
 
+        # ── SELECT results ───────────────────────────────────────────────────
         row_count = results["row_count"]
-        if row_count == 0:
-            return "Query ran successfully but returned no matching records."
-
         data = results["data"]
-        preview_count = min(5, row_count)
         truncated = results.get("truncated", False)
 
-        formatted = f"Found {row_count} result(s)"
+        if row_count == 0:
+            return "The query ran successfully but returned no matching records."
+
+        # Detect table name from context if possible (best-effort)
+        noun = "record" if row_count == 1 else "records"
+
+        # Truncation notice
         if truncated:
-            formatted += f" (showing first {_MAX_RESULT_ROWS})"
-        formatted += ".\n\n"
+            return (
+                f"✅ Showing the first {row_count:,} {noun} "
+                f"(result set is larger — add a LIMIT or WHERE clause to narrow it down)."
+            )
 
-        if row_count > preview_count:
-            formatted += f"Here are the first {preview_count}:\n"
+        # Single row — show it inline as a compact summary
+        if row_count == 1:
+            pairs = ", ".join(f"{k}: **{v}**" for k, v in data[0].items())
+            return f"✅ Found 1 {noun}: {pairs}"
 
-        for i, row in enumerate(data[:preview_count], 1):
-            formatted += f"\nRow {i}:\n"
-            for key, value in row.items():
-                formatted += f"  {key}: {value}\n"
+        # Small result (2–5 rows) — still just show the count; table renders below
+        if row_count <= 5:
+            return f"✅ Found {row_count} {noun}."
 
-        if row_count > preview_count:
-            formatted += f"\n... and {row_count - preview_count} more row(s)"
-
-        return formatted
+        # Larger result — give a meaningful headline
+        return f"✅ Found {row_count:,} {noun}."

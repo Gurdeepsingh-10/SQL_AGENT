@@ -18,6 +18,7 @@ from app.utils.logger import get_logger
 import hashlib
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = get_logger(__name__)
 
@@ -111,14 +112,29 @@ class SchemaInspector:
         # FK graph: table -> list of {from_col, to_table, to_col}
         self._fk_graph: Dict[str, List[Dict[str, str]]] = {}
 
+        # Shared fetcher pool for parallel introspection
+        self._executor = ThreadPoolExecutor(max_workers=10)
+
     # ------------------------------------------------------------------
     # Public: table listing
     # ------------------------------------------------------------------
 
-    def get_all_tables(self) -> List[str]:
-        """Return all user-visible table names."""
+    def get_all_tables(self, force_refresh: bool = False) -> List[str]:
+        """Return all user-visible table names.
+        Uses a 60s TTL for table lists too — avoids even one DB query.
+        """
+        now = time.time()
+        if (
+            not force_refresh
+            and self._schema_cache is not None
+            and (now - self._cache_timestamp) < 60.0
+        ):
+            return list(self._schema_cache.get("tables", {}).keys())
+
         try:
-            tables = self._inspector.get_table_names()
+            # Create a fresh inspector per query to ensure thread safety
+            insp = inspect(self.engine)
+            tables = insp.get_table_names()
             logger.debug(f"[SchemaInspector] Found {len(tables)} tables")
             return tables
         except Exception as e:
@@ -129,15 +145,22 @@ class SchemaInspector:
     # Public: single table schema
     # ------------------------------------------------------------------
 
-    def get_table_schema(self, table_name: str) -> Dict[str, Any]:
+    def get_table_schema(
+        self,
+        table_name: str,
+        shared_inspector=None,
+        row_count_override: Optional[int] = None
+    ) -> Dict[str, Any]:
         """
         Return detailed schema for one table including columns, PKs, FKs,
         indexes, and row count.
         """
         try:
-            columns_raw = self._inspector.get_columns(table_name)
-            pk_info = self._inspector.get_pk_constraint(table_name)
-            fk_list = self._inspector.get_foreign_keys(table_name)
+            # Use provided inspector (for sequential) or fresh one (for parallel)
+            insp = shared_inspector or inspect(self.engine)
+            columns_raw = insp.get_columns(table_name)
+            pk_info = insp.get_pk_constraint(table_name)
+            fk_list = insp.get_foreign_keys(table_name)
             try:
                 indexes = self._inspector.get_indexes(table_name)
             except Exception:
@@ -168,7 +191,8 @@ class SchemaInspector:
                     }
                 )
 
-            row_count = self._get_row_count(table_name)
+            # Use override (from batch) or fetch individually
+            row_count = row_count_override if row_count_override is not None else self._get_row_count(table_name)
 
             indexed_cols: List[str] = []
             for idx in indexes:
@@ -197,9 +221,23 @@ class SchemaInspector:
     def get_full_schema(self, force_refresh: bool = False) -> Dict[str, Any]:
         """
         Return the complete database schema.
-        Uses fingerprint-based cache invalidation: if the set of tables
-        changes, the cache is automatically invalidated.
+        Uses a 60-second TTL short-circuit: if the schema was built within
+        the last 60 seconds, return it immediately with zero DB queries.
+        After 60s, does a fingerprint check (one get_all_tables() query) to
+        detect schema changes (DDL) before returning cached data.
         """
+        now = time.time()
+
+        # ── Short-circuit: recent cache (< 60s old) — zero DB queries ─────
+        if (
+            not force_refresh
+            and self._schema_cache is not None
+            and (now - self._cache_timestamp) < 60.0
+        ):
+            logger.debug("[SchemaInspector] Returning TTL-cached schema (no DB query)")
+            return self._schema_cache
+
+        # ── Fingerprint check: detects DDL changes ─────────────────────────
         current_tables = self.get_all_tables()
         current_fp = self._compute_fingerprint(current_tables)
 
@@ -209,6 +247,7 @@ class SchemaInspector:
             and current_fp == self._schema_fingerprint
         ):
             logger.debug("[SchemaInspector] Returning fingerprint-validated cache")
+            self._cache_timestamp = now  # refresh TTL
             return self._schema_cache
 
         logger.info(
@@ -216,31 +255,49 @@ class SchemaInspector:
             f"(fingerprint={'changed' if self._schema_fingerprint else 'new'})"
         )
 
+        # ── Row Count Batching: avoids N sequential COUNT(*) calls ────────
+        batch_counts = self._batch_get_row_counts(current_tables)
+
+        # ── Parallel Build: Collapsing RTT ──────────────────────────────
         schema: Dict[str, Any] = {"tables": {}, "total_tables": len(current_tables)}
         fk_graph: Dict[str, List[Dict[str, str]]] = {}
 
-        for table in current_tables:
-            table_schema = self.get_table_schema(table)
-            schema["tables"][table] = table_schema
+        # Fetch all table schemas in parallel
+        futures = {
+            self._executor.submit(
+                self.get_table_schema,
+                table_name=table,
+                row_count_override=batch_counts.get(table)
+            ): table
+            for table in current_tables
+        }
 
-            # Build FK graph
-            fk_graph[table] = []
-            for fk in table_schema.get("foreign_keys", []):
-                for src_col, ref_col in zip(
-                    fk["constrained_columns"], fk["referred_columns"]
-                ):
-                    fk_graph[table].append(
-                        {
-                            "from_col": src_col,
-                            "to_table": fk["referred_table"],
-                            "to_col": ref_col,
-                        }
-                    )
+        for future in as_completed(futures):
+            table = futures[future]
+            try:
+                table_schema = future.result()
+                schema["tables"][table] = table_schema
+
+                # Build FK graph incrementally
+                fk_graph[table] = []
+                for fk in table_schema.get("foreign_keys", []):
+                    for src_col, ref_col in zip(
+                        fk["constrained_columns"], fk["referred_columns"]
+                    ):
+                        fk_graph[table].append(
+                            {
+                                "from_col": src_col,
+                                "to_table": fk["referred_table"],
+                                "to_col": ref_col,
+                            }
+                        )
+            except Exception as e:
+                logger.error(f"[SchemaInspector] Failed parallel fetch for {table}: {e}")
 
         self._schema_cache = schema
         self._schema_fingerprint = current_fp
         self._fk_graph = fk_graph
-        self._cache_timestamp = time.time()
+        self._cache_timestamp = now
 
         logger.info(f"[SchemaInspector] Schema cached (fingerprint={current_fp[:8]})")
         return schema
@@ -250,29 +307,74 @@ class SchemaInspector:
         self._schema_cache = None
         self._schema_fingerprint = None
         self._fk_graph = {}
+        self._cache_timestamp = 0.0
         logger.info("[SchemaInspector] Cache cleared")
+
+    def clear_row_count_cache(self) -> None:
+        """Bust row count cache after DML (INSERT/UPDATE/DELETE).
+
+        Unlike clear_cache(), this resets all three cache layers (data,
+        fingerprint, and timestamp) so the next get_full_schema() call does
+        a full rebuild including fresh COUNT(*) queries while keeping the
+        inspector object alive (avoids re-initializing the ThreadPoolExecutor).
+        """
+        self._schema_cache = None
+        self._schema_fingerprint = None   # must also reset — fingerprint check
+        self._cache_timestamp = 0.0       # would otherwise return stale row counts
+        logger.info("[SchemaInspector] Row count cache busted — will refresh on next access")
+
 
     # ------------------------------------------------------------------
     # Public: LLM context string
     # ------------------------------------------------------------------
 
-    def get_schema_context_for_llm(self) -> str:
+    def get_schema_context_for_llm(self, relevant_tables: Optional[List[str]] = None) -> str:
         """
         Return a rich, dialect-annotated schema description optimised for
-        LLM prompts.  Includes FK relationships and indexed columns.
+        LLM prompts. 
+        
+        If relevant_tables is provided, it returns a PRUNED schema containing
+        only those tables plus their immediate FK neighbors. Otherwise returns 
+        the full schema.
         """
         schema = self.get_full_schema()
 
         if schema["total_tables"] == 0:
             return "No tables found. The database is empty."
 
+        # Determine which tables to include
+        target_tables: Set[str] = set()
+        if relevant_tables:
+            # Normalize and find actual names from schema
+            existing_tables = set(schema["tables"].keys())
+            for rt in relevant_tables:
+                actual = next((et for et in existing_tables if et.lower() == rt.lower()), None)
+                if actual:
+                    target_tables.add(actual)
+                    # Include neighbors (FK relatives) for join context
+                    fk_rels = self._fk_graph.get(actual, [])
+                    for rel in fk_rels:
+                        target_tables.add(rel["to_table"])
+                    # Also include tables that point TO this table
+                    for parent, rels in self._fk_graph.items():
+                        for r in rels:
+                            if r["to_table"] == actual:
+                                target_tables.add(parent)
+        
+        # Fallback to all tables if no pruning filter was effective
+        tables_to_render = target_tables if target_tables else set(schema["tables"].keys())
+
         lines: List[str] = [
             f"Database Dialect: {self.dialect.upper()}",
-            f"Total Tables: {schema['total_tables']}",
+            f"Included Tables: {len(tables_to_render)} (out of {schema['total_tables']})",
             "",
         ]
 
-        for table_name, tinfo in schema["tables"].items():
+        # Use sorted list for deterministic prompt output
+        for table_name in sorted(list(tables_to_render)):
+            tinfo = schema["tables"].get(table_name)
+            if not tinfo: continue
+            
             lines.append(f"TABLE: {table_name}  ({tinfo['row_count']} rows)")
             lines.append("  Columns:")
             for col in tinfo["columns"]:
@@ -304,7 +406,7 @@ class SchemaInspector:
                     )
             lines.append("")
 
-        return "\n".join(lines)
+        return "\n".join(lines).strip()
 
     # ------------------------------------------------------------------
     # Public: strict grounding helpers
@@ -477,6 +579,37 @@ class SchemaInspector:
         except Exception as e:
             logger.warning(f"[SchemaInspector] Row count failed for {table_name}: {e}")
             return 0
+
+    def _batch_get_row_counts(self, table_names: List[str]) -> Dict[str, int]:
+        """Fetch row counts for multiple tables in one go (dialect-optimized)."""
+        counts = {t: None for t in table_names}
+        if not table_names:
+            return counts
+
+        if self.dialect == "postgresql":
+            try:
+                # Optimized estimated count for Postgres (from pg_class)
+                # This is near-instant compared to sequential COUNT(*)
+                with self.engine.connect() as conn:
+                    query = text("""
+                        SELECT relname, reltuples::bigint AS count
+                        FROM pg_class C
+                        JOIN pg_namespace N ON (N.oid = C.relnamespace)
+                        WHERE relname = ANY(:names)
+                        AND nspname NOT IN ('pg_catalog', 'information_schema')
+                        AND relkind = 'r'
+                    """)
+                    result = conn.execute(query, {"names": table_names})
+                    for row in result:
+                        counts[row[0]] = max(0, row[1])
+                logger.debug(f"[SchemaInspector] Batched row counts (Postgres) for {len(table_names)} tables")
+                return counts
+            except Exception as e:
+                logger.warning(f"[SchemaInspector] Postgres batch row count failed: {e}")
+
+        # SQLite/Other dialects: Sequential count is usually unavoidable
+        # but we only do it if explicitly needed. For and LLC context, 0 is often ok fallback.
+        return counts
 
     @staticmethod
     def _compute_fingerprint(tables: List[str]) -> str:

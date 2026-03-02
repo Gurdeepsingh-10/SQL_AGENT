@@ -16,6 +16,7 @@ from groq import Groq
 from typing import Dict, Any, List, Optional
 from app.config import settings
 from app.utils.logger import get_logger
+import hashlib
 import re
 import time
 
@@ -23,6 +24,10 @@ logger = get_logger(__name__)
 
 _MAX_RETRIES = 3
 _RETRY_BASE_DELAY = 1.0
+
+# In-memory SQL generation cache
+_SQL_CACHE: Dict[str, str] = {}
+_SQL_CACHE_MAX = 128
 
 
 # ---------------------------------------------------------------------------
@@ -35,6 +40,7 @@ DIALECT_RULES: Dict[str, str] = {
 - Use NOW() or CURRENT_TIMESTAMP for current time
 - Use EXTRACT(EPOCH FROM ...) for timestamp arithmetic
 - Use RETURNING clause for INSERT/UPDATE/DELETE when needed
+- For batch data entry, use ON CONFLICT DO NOTHING to prevent constraint errors
 - Boolean literals: TRUE / FALSE (not 1/0)
 - String concatenation: || operator
 - Use LIMIT/OFFSET for pagination
@@ -140,8 +146,8 @@ def _call_groq_with_retry(
     return None
 
 
-def _clean_sql(sql: str) -> str:
-    """Strip markdown fences and normalize whitespace."""
+def _clean_sql(sql: str, intent: str = "", dialect: str = "") -> str:
+    """Strip markdown fences, normalize whitespace, and post-process for safety."""
     sql = re.sub(r"```sql\s*", "", sql, flags=re.IGNORECASE)
     sql = re.sub(r"```\s*", "", sql)
     # Remove leading/trailing prose lines (lines not starting with SQL keywords)
@@ -152,16 +158,31 @@ def _clean_sql(sql: str) -> str:
         "COMMIT", "ROLLBACK", "--", "/*",
     }
     # Find first SQL line
-    start_idx = 0
+    start_idx = -1
     for i, line in enumerate(lines):
         stripped = line.strip().upper()
         if any(stripped.startswith(kw) for kw in sql_keywords):
             start_idx = i
             break
+
+    if start_idx == -1:
+        return None
+
     sql = "\n".join(lines[start_idx:]).strip()
     # Ensure single trailing semicolon
-    sql = sql.rstrip(";").strip() + ";"
-    return sql
+    sql = sql.rstrip(";").strip()
+
+    # ── PostgreSQL INSERT safety: inject ON CONFLICT DO NOTHING ──────────────
+    # This deterministically prevents UniqueViolation for batch inserts.
+    # Applied when: dialect is postgresql, it's an INSERT, and no conflict clause exists.
+    if (
+        dialect.lower() == "postgresql"
+        and sql.upper().lstrip().startswith("INSERT")
+        and "ON CONFLICT" not in sql.upper()
+    ):
+        sql = sql + "\nON CONFLICT DO NOTHING"
+
+    return sql + ";"
 
 
 # ---------------------------------------------------------------------------
@@ -170,15 +191,15 @@ def _clean_sql(sql: str) -> str:
 
 class SQLGenerator:
     """
-    Generates SQL queries from natural language using a multi-pass approach:
-    Pass 1 — Generate candidate SQL with CoT reasoning
-    Pass 2 — Validate against schema metadata and dialect rules
-    Pass 3 — Optimize for correctness and performance
+    Generates SQL queries from natural language using a single-pass approach.
+    Uses faster 8B model for simple queries, 70B only for complex/DDL.
+    Response cache avoids redundant Groq calls for repeated inputs.
     """
 
     def __init__(self):
         self.client = Groq(api_key=settings.GROQ_API_KEY)
         self.model = settings.GROQ_MODEL
+        self.fast_model = getattr(settings, 'GROQ_FAST_MODEL', 'llama-3.1-8b-instant')
 
     # ------------------------------------------------------------------
     # Primary: multi-pass generation
@@ -193,56 +214,54 @@ class SQLGenerator:
         dialect: str = "sqlite",
         reasoning: str = "",
         conversation_history: Optional[List[Dict[str, str]]] = None,
+        last_sql_context: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Generate SQL using a three-pass refinement pipeline.
+        Generate SQL using a streamlined single-pass approach with caching.
 
         Returns:
-            {
-                "sql": str,
-                "intent": str,
-                "confidence": float,
-                "reasoning": str,
-                "dialect": str,
-                "passes": int,
-                "requires_parameters": bool,
-                "error": Optional[str]
-            }
+            {"sql": str, "intent": str, "confidence": float, "reasoning": str,
+             "dialect": str, "passes": int, "requires_parameters": bool, "error": Optional[str]}
         """
         dialect = dialect.lower() if dialect else "sqlite"
 
-        # Pass 1: Generate candidate
-        candidate = self._pass1_generate(query, intent, entities, schema_context, dialect, reasoning)
+        # ── Check SQL cache ──────────────────────────────────────────────
+        cache_key = hashlib.md5(
+            f"{query.strip().lower()}|{intent}|{dialect}|{schema_context[:400]}".encode()
+        ).hexdigest()
+        # Never cache INSERT statements — repeating the same INSERT causes UniqueViolation
+        if intent != "INSERT" and cache_key in _SQL_CACHE:
+            cached_sql = _SQL_CACHE[cache_key]
+            logger.debug(f"[SQLGenerator] Cache hit for: {query[:60]}")
+            return {
+                "sql": cached_sql, "intent": intent, "confidence": 0.95,
+                "reasoning": reasoning, "dialect": dialect, "passes": 0,
+                "requires_parameters": self._check_requires_parameters(cached_sql),
+                "error": None,
+            }
+
+        # ── Single-pass generation ─────────────────────────────────────────
+        candidate = self._pass1_generate(query, intent, entities, schema_context, dialect, reasoning, last_sql_context)
         if not candidate:
             return {
                 "sql": None, "intent": intent, "confidence": 0.0,
                 "reasoning": reasoning, "dialect": dialect, "passes": 1,
                 "requires_parameters": False,
-                "error": "Pass 1: Failed to generate SQL candidate",
+                "error": "Failed to generate SQL candidate",
             }
 
-        # Pass 2: Schema-grounded validation and correction
-        validated = self._pass2_validate_and_correct(
-            candidate, query, intent, entities, schema_context, dialect
-        )
-        if not validated:
-            validated = candidate  # Fall back to pass 1 result
-
-        # Pass 3: Optimization pass (only for complex queries)
-        final_sql = validated
-        passes = 2
-        if self._is_complex(validated):
-            optimized = self._pass3_optimize(validated, schema_context, dialect)
-            if optimized:
-                final_sql = optimized
-                passes = 3
-
-        final_sql = _clean_sql(final_sql)
+        final_sql = _clean_sql(candidate, intent=intent, dialect=dialect)
 
         logger.info(
-            f"[SQLGenerator] Generated SQL ({passes} passes, dialect={dialect}): "
+            f"[SQLGenerator] Generated SQL (dialect={dialect}): "
             f"{final_sql[:120]}..."
         )
+
+        # Cache successful results
+        if len(_SQL_CACHE) >= _SQL_CACHE_MAX:
+            oldest = next(iter(_SQL_CACHE))
+            del _SQL_CACHE[oldest]
+        _SQL_CACHE[cache_key] = final_sql
 
         return {
             "sql": final_sql,
@@ -250,7 +269,7 @@ class SQLGenerator:
             "confidence": 0.92,
             "reasoning": reasoning,
             "dialect": dialect,
-            "passes": passes,
+            "passes": 1,
             "requires_parameters": self._check_requires_parameters(final_sql),
             "error": None,
         }
@@ -258,6 +277,16 @@ class SQLGenerator:
     # ------------------------------------------------------------------
     # Pass 1: Candidate generation with CoT
     # ------------------------------------------------------------------
+
+    def _select_model(self, query: str, intent: str) -> str:
+        """Use the fast 8B model unless the query is DDL or clearly complex."""
+        if intent == 'DDL':
+            return self.model  # DDL benefits from the smarter model
+        is_complex = bool(re.search(
+            r'\b(join|subquery|union|window|partition|having|rank|dense_rank|lag|lead|rollup|cube|pivot)\b',
+            query, re.I
+        ))
+        return self.model if is_complex else self.fast_model
 
     def _pass1_generate(
         self,
@@ -267,22 +296,25 @@ class SQLGenerator:
         schema_context: str,
         dialect: str,
         reasoning: str,
+        last_sql_context: Optional[str] = None,
     ) -> Optional[str]:
         dialect_rules = DIALECT_RULES.get(dialect, DIALECT_RULES["sqlite"])
         system_prompt = self._build_system_prompt(intent, dialect_rules)
         user_prompt = self._build_generation_prompt(
-            query, intent, entities, schema_context, reasoning
+            query, intent, entities, schema_context, reasoning, last_sql_context
         )
+
+        selected_model = self._select_model(query, intent)
 
         raw = _call_groq_with_retry(
             self.client,
-            self.model,
+            selected_model,
             [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.05,
-            max_tokens=1200,
+            max_tokens=400,  # SQL is rarely > 200 tokens; 400 gives ample headroom
         )
         return raw
 
@@ -445,8 +477,15 @@ Use simple language. Avoid technical jargon."""
 {ddl_note}
 
 CRITICAL: Only use table and column names that exist in the provided schema.
-If a requested table or column does not exist, use the closest matching name from the schema.
-Return ONLY the SQL query."""
+For batch INSERT requests (e.g., "add 10 records"):
+  - Generate diverse, realistic fictional values. NEVER reuse the same name, date, or email.
+  - MANDATORY for PostgreSQL: End every INSERT statement with ON CONFLICT DO NOTHING to skip duplicates.
+  - Example format:
+    INSERT INTO table (col1, col2) VALUES
+      ('UniqueValue1', '1985-03-15'),
+      ('UniqueValue2', '1978-07-22')
+    ON CONFLICT DO NOTHING;
+Return ONLY the SQL. No explanations. No markdown code fences."""
 
     def _build_generation_prompt(
         self,
@@ -455,17 +494,25 @@ Return ONLY the SQL query."""
         entities: Dict[str, Any],
         schema_context: str,
         reasoning: str,
+        last_sql_context: Optional[str] = None,
     ) -> str:
         entities_text = self._format_entities(entities)
         reasoning_section = (
             f"\nPrior reasoning:\n{reasoning}\n" if reasoning else ""
+        )
+        # Inject previous SQL as context so follow-up queries work correctly.
+        # e.g. 'show me the rows that were affected' knows which table was just modified.
+        context_section = (
+            f"\nPrevious SQL context (the last operation run):\n{last_sql_context}\n"
+            f"Use this to understand what table/data the user is referring to in follow-up queries.\n"
+            if last_sql_context else ""
         )
 
         return f"""Convert this natural language query to SQL.
 
 Natural Language Query: "{query}"
 Intent: {intent}
-{reasoning_section}
+{reasoning_section}{context_section}
 Database Schema:
 {schema_context}
 

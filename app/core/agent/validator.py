@@ -51,7 +51,7 @@ INJECTION_PATTERNS = [
     r"'\s*OR\s+'[^']*'\s*=\s*'",    # ' OR 'x'='x
     r"--\s",                          # SQL line comment (with space after)
     r"/\*.*?\*/",                     # Multi-line comments
-    r";\s*(DROP|DELETE|TRUNCATE|UPDATE|INSERT)",  # Statement chaining
+    r";\s*(DROP|DELETE|TRUNCATE|UPDATE|ALTER|GRANT|REVOKE)",  # Dangerous chaining
     r"UNION\s+(ALL\s+)?SELECT",      # UNION-based injection
     r"xp_cmdshell",                  # Command execution
     r"WAITFOR\s+DELAY",              # Time-based blind injection
@@ -270,14 +270,17 @@ class SQLValidator:
             # Filter out empty statements (trailing semicolons produce empty ones)
             non_empty = [
                 s for s in parsed
-                if s.get_type() is not None or str(s).strip().rstrip(";").strip()
+                if s.get_type() is not None and str(s).strip().rstrip(";").strip()
             ]
 
             if len(non_empty) > 1:
-                return {
-                    "is_valid": False,
-                    "message": "Multiple SQL statements detected — only single statements allowed",
-                }
+                # Check if all statements are INSERTs — we allow multiple INSERTs for batch loading
+                all_inserts = all(s.get_type() == 'INSERT' for s in non_empty)
+                if not all_inserts:
+                    return {
+                        "is_valid": False,
+                        "message": "Multiple SQL statements detected — only single statements or multiple INSERTs allowed",
+                    }
 
             return {"is_valid": True, "message": "Syntax valid"}
 
@@ -312,25 +315,51 @@ class SQLValidator:
                 "suggestions": {},
             }
 
+    # System schemas that are always valid — never check them against the user's schema
+    _SYSTEM_SCHEMAS = frozenset({
+        "information_schema", "pg_catalog", "pg_toast", "pg_temp",
+        "sys", "mysql", "performance_schema", "information_schema",
+        "dbo", "master", "msdb", "tempdb",  # MSSQL
+        "dual",  # Oracle
+    })
+
     def _extract_table_names(self, sql: str) -> List[str]:
-        """Extract table names from FROM, JOIN, INTO, UPDATE clauses."""
+        """Extract table names from FROM, JOIN, INTO, UPDATE clauses.
+        Handles schema-qualified references (schema.table) and skips system schemas.
+        """
         tables: Set[str] = set()
 
+        # Match both plain table names AND schema-qualified ones: schema.table or `schema`.`table`
         patterns = [
-            r"\bFROM\s+([`\"\[]?[\w]+[`\"\]]?)",
-            r"\bJOIN\s+([`\"\[]?[\w]+[`\"\]]?)",
-            r"\bINTO\s+([`\"\[]?[\w]+[`\"\]]?)",
-            r"\bUPDATE\s+([`\"\[]?[\w]+[`\"\]]?)",
+            r"\bFROM\s+([`\"\[]?[\w]+[`\"\]]?(?:\.[`\"\[]?[\w]+[`\"\]]?)?)",
+            r"\bJOIN\s+([`\"\[]?[\w]+[`\"\]]?(?:\.[`\"\[]?[\w]+[`\"\]]?)?)",
+            r"\bINTO\s+([`\"\[]?[\w]+[`\"\]]?(?:\.[`\"\[]?[\w]+[`\"\]]?)?)",
+            r"\bUPDATE\s+([`\"\[]?[\w]+[`\"\]]?(?:\.[`\"\[]?[\w]+[`\"\]]?)?)",
         ]
+
+        skip_keywords = {
+            "SELECT", "FROM", "WHERE", "SET", "VALUES",
+            "TABLE", "DATABASE", "SCHEMA",
+        }
 
         for pattern in patterns:
             for match in re.finditer(pattern, sql, re.IGNORECASE):
-                name = match.group(1).strip("`\"[]")
-                # Skip SQL keywords that might be captured
-                if name.upper() not in {
-                    "SELECT", "FROM", "WHERE", "SET", "VALUES",
-                    "TABLE", "DATABASE", "SCHEMA",
-                }:
+                raw = match.group(1).strip("`\"[]")
+
+                # Handle schema-qualified names: schema.table
+                if "." in raw:
+                    schema_part, table_part = raw.split(".", 1)
+                    schema_part = schema_part.strip("`\"[]")
+                    table_part = table_part.strip("`\"[]")
+                    # Skip if it's a known system schema — these are always valid
+                    if schema_part.lower() in self._SYSTEM_SCHEMAS:
+                        continue
+                    # Otherwise validate just the table part
+                    name = table_part
+                else:
+                    name = raw
+
+                if name.upper() not in skip_keywords:
                     tables.add(name)
 
         return list(tables)

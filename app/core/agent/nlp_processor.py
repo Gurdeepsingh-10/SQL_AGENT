@@ -15,6 +15,7 @@ from groq import Groq
 from typing import Dict, Any, List, Optional
 from app.config import settings
 from app.utils.logger import get_logger
+import hashlib
 import json
 import time
 import re
@@ -40,6 +41,83 @@ VALID_INTENTS = {
 
 _MAX_RETRIES = 3
 _RETRY_BASE_DELAY = 1.0  # seconds
+
+# ---------------------------------------------------------------------------
+# Rule-based fast-path intent patterns (no LLM needed)
+# ---------------------------------------------------------------------------
+
+_FAST_INTENT_RULES = [
+    # ── HIGHEST PRIORITY: DATA RETRIEVAL keywords ───────────────────────────
+    # "show all entries", "get all records", "display rows/data/values", etc.
+    # These are unambiguously data queries (QUERY), never schema queries.
+    (re.compile(r'\b(entries|records|rows|data|values|content|items)\b', re.I), 'QUERY', 0.97),
+
+    # ── 'show me the X table' → QUERY (show specific table content) ─────────
+    # MUST be before SCHEMA_INFO rule. 'show me the teacher table' → QUERY.
+    # Only triggers when a concrete table name (non-schema word) follows 'the'.
+    (re.compile(
+        r'^\s*(show|display|get)\s+(me\s+)?(the\s+)?(?!schema|all|list|columns|structure|database)\w+\s+table\b',
+        re.I
+    ), 'QUERY', 0.96),
+
+    # ── SCHEMA_INFO — user wants table structure/list, not data ─────────────
+    (re.compile(
+        r'^\s*('
+        r'show\s+(me\s+)?(the\s+)?(schema|tables|all\s+tables|columns|structure|database\s+schema)'
+        r'|list\s+(all\s+)?tables'
+        r'|what\s+(are\s+)?(the\s+)?tables'
+        r'|which\s+tables'
+        r'|what\s+tables'
+        r'|describe\s+(the\s+)?(schema|database|tables)'
+        r'|table\s+(list|structure|info|information)'
+        r'|database\s+(schema|tables|structure)'
+        r'|tell\s+me\s+(about\s+)?(the\s+)?(schema|tables)'
+        r'|what\s+does\s+(the\s+)?database\s+(look\s+like|contain|have)'
+        r'|how\s+many\s+tables'
+        r')',
+        re.I
+    ), 'SCHEMA_INFO', 0.95),
+
+    # ── DDL ─────────────────────────────────────────────────────────────────
+    (re.compile(r'^\s*(create table|alter table|drop table|create index|create view|add column|rename|make table)\b', re.I), 'DDL', 0.92),
+
+    # ── INSERT / POPULATE / ADD DATA ────────────────────────────────────────
+    (re.compile(r'^\s*(insert|add|create\s+(a\s+)?record|new\s+entry|put|populate|fill|write|append)\b', re.I), 'INSERT', 0.95),
+
+    # ── Standard QUERY ──────────────────────────────────────────────────────
+    (re.compile(r'^\s*select\b', re.I), 'QUERY', 0.95),
+    (re.compile(r'^\s*(count|how many|how much|total|sum|average|avg|min|max)\b', re.I), 'QUERY', 0.90),
+
+    # ── DML mutations ───────────────────────────────────────────────────────
+    (re.compile(r'^\s*(update|change|modify|set|edit)\b', re.I), 'UPDATE', 0.90),
+    (re.compile(r'^\s*(delete|remove|drop record)\b', re.I), 'DELETE', 0.90),
+
+    # ── Generic QUERY fallback — show/list/get/find/retrieve ────────────────
+    # Note: 'show tables' is caught first by SCHEMA_INFO above.
+    # This catches 'show me X', 'list all X', 'get X from Y', etc.
+    (re.compile(r'^\s*(show|list|get|fetch|display|give me|tell me|find|retrieve|search|what is|what are)\b', re.I), 'QUERY', 0.88),
+]
+
+# Disqualify fast-path if query contains complex SQL indicators
+_COMPLEX_INDICATORS = re.compile(
+    r'\b(join|subquery|union|window|partition|having|cte|rank|dense_rank|lag|lead|rollup|cube|pivot|with\s+\w+\s+as)\b',
+    re.I
+)
+# Disqualify if query has clear cross-turn pronoun references
+_COREF_PRONOUNS = re.compile(
+    r'\b(they|them|their|those|these|him|her|his|hers)\b',
+    re.I
+)
+
+# ---------------------------------------------------------------------------
+# In-memory response cache (intent classification)
+# Key = MD5 hash(query_lower + schema_fingerprint)
+# ---------------------------------------------------------------------------
+
+_INTENT_CACHE: Dict[str, Dict[str, Any]] = {}
+_INTENT_CACHE_MAX = 256  # evict oldest when full
+_CACHE_HITS = 0
+_CACHE_MISSES = 0
 
 
 # ---------------------------------------------------------------------------
@@ -121,11 +199,76 @@ class NLPProcessor:
     """
     Processes natural language queries with chain-of-thought reasoning,
     multi-intent decomposition, and coreference resolution.
+
+    v3 enhancements: rule-based fast-path, response caching, fast model by default.
     """
 
     def __init__(self):
         self.client = Groq(api_key=settings.GROQ_API_KEY)
         self.model = settings.GROQ_MODEL
+        self.fast_model = getattr(settings, 'GROQ_FAST_MODEL', 'llama-3.1-8b-instant')
+
+    def _select_model(self, query: str) -> str:
+        """Use the fast 8B model unless the query is clearly complex."""
+        is_complex = bool(_COMPLEX_INDICATORS.search(query))
+        return self.model if is_complex else self.fast_model
+
+    # ------------------------------------------------------------------
+    # Rule-based fast-path (zero LLM calls for obvious intents)
+    # ------------------------------------------------------------------
+
+    def _fast_intent(self, query: str, schema_context: str) -> Optional[Dict[str, Any]]:
+        """
+        Try to classify intent purely with regex rules.
+        Returns None if the query is too complex for rule-based classification.
+        """
+        q = query.strip()
+        # Don't fast-path if query has complex indicators or coreference pronouns
+        if _COMPLEX_INDICATORS.search(q) or _COREF_PRONOUNS.search(q):
+            return None
+        # Don't fast-path if query is very long (likely complex)
+        if len(q.split()) > 30:
+            return None
+
+        for pattern, intent, confidence in _FAST_INTENT_RULES:
+            if pattern.search(q):
+                logger.debug(f"[NLPProcessor] Fast-path intent={intent} for: {q[:60]}")
+                return {
+                    "intent": intent,
+                    "confidence": confidence,
+                    "entities": {},
+                    "reasoning": f"Rule-based classification: {intent}",
+                    "sub_tasks": [],
+                    "resolved_query": query,
+                }
+        return None
+
+    # ------------------------------------------------------------------
+    # Response cache helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _cache_key(query: str, schema_context: str) -> str:
+        raw = f"{query.strip().lower()}|{schema_context[:500]}"
+        return hashlib.md5(raw.encode()).hexdigest()
+
+    @staticmethod
+    def _cache_get(key: str) -> Optional[Dict[str, Any]]:
+        global _CACHE_HITS, _CACHE_MISSES
+        if key in _INTENT_CACHE:
+            _CACHE_HITS += 1
+            return _INTENT_CACHE[key]
+        _CACHE_MISSES += 1
+        return None
+
+    @staticmethod
+    def _cache_set(key: str, value: Dict[str, Any]) -> None:
+        global _INTENT_CACHE
+        if len(_INTENT_CACHE) >= _INTENT_CACHE_MAX:
+            # Evict oldest entry
+            oldest = next(iter(_INTENT_CACHE))
+            del _INTENT_CACHE[oldest]
+        _INTENT_CACHE[key] = value
 
     # ------------------------------------------------------------------
     # Primary: classify intent with CoT
@@ -139,40 +282,112 @@ class NLPProcessor:
     ) -> Dict[str, Any]:
         """
         Classify intent with explicit chain-of-thought reasoning.
+        Also extracts entities in the same call for efficiency.
+
+        v3 optimizations:
+        - Rule-based fast-path for obvious intents (zero LLM calls)
+        - Response cache for repeated (query+schema) combinations
+        - Fast 8B model by default, 70B only for complex queries
+        - Coreference resolution only for clear pronoun references
 
         Returns:
             {
                 "intent": str,
                 "confidence": float,
                 "entities": {...},
-                "reasoning": str,          # CoT steps
-                "sub_tasks": [...],        # For multi-intent queries
-                "resolved_query": str,     # After coreference resolution
+                "reasoning": str,
+                "sub_tasks": [...],
+                "resolved_query": str,
             }
         """
-        # Step 1: Resolve coreferences if history is provided
-        resolved_query = query
-        if conversation_history:
-            resolved_query = self._resolve_coreferences(query, conversation_history, schema_context)
+        # ── 1. Rule-based fast-path (no LLM call at all) ──────────────────
+        # Always run fast-path first UNLESS the query has coreference pronouns
+        # (it, them, their, those) which require history to resolve.
+        # Previously this was skipped entirely with history, causing queries like
+        # "show all entries in student" to be misrouted to SCHEMA_INFO by the LLM.
+        if not self._needs_coreference(query):
+            fast = self._fast_intent(query, schema_context)
+            if fast is not None:
+                return fast
 
-        # Step 2: Classify with CoT
-        prompt = self._build_cot_intent_prompt(resolved_query, schema_context)
+        # ── 2. Coreference resolution (only for clear pronoun references) ──
+        resolved_query = query
+        # Only resolve if query has *clear* pronoun references AND history exists
+        if conversation_history and self._needs_coreference(query):
+            resolved_query = self._resolve_coreferences(query, conversation_history, schema_context) or query
+
+        # ── 3. Response cache ─────────────────────────────────────────────
+        cache_key = self._cache_key(resolved_query, schema_context)
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            logger.debug(f"[NLPProcessor] Cache hit for: {query[:60]}")
+            return cached
+
+        # ── 4. LLM call ───────────────────────────────────────────────────
+        history_section = ""
+        if conversation_history:
+            recent = conversation_history[-4:]  # reduced from 6 to 4
+            history_text = "\n".join(
+                f"{m.get('role', 'user').upper()}: {m.get('content', '')[:200]}"
+                for m in recent
+            )
+            history_section = f"\n\nRecent conversation:\n{history_text}"
+
+        selected_model = self._select_model(query)
+
+        prompt = f"""Classify this database query and extract entities.
+
+Query: "{resolved_query}"
+Database Schema:
+{schema_context if schema_context else "No tables found. DDL operations are possible."}
+{history_section}
+
+Intent classification rules (CRITICAL — read carefully):
+- SCHEMA_INFO: User wants to KNOW THE STRUCTURE of the database — tables list, column names, data types, relationships. Examples: "what tables exist", "describe the schema", "show me the columns of X"
+- QUERY: User wants to READ DATA/ROWS from a table. Examples: "show all entries in X", "get all records from X", "list all rows", "show me the data in X", "select from X", "how many rows"
+- INSERT: User wants to ADD new rows/records/data.
+- UPDATE: User wants to CHANGE existing data.
+- DELETE: User wants to REMOVE rows.
+- DDL: User wants to CREATE, ALTER, or DROP a table/index.
+- UNKNOWN: Cannot determine with confidence.
+
+Key disambiguation:
+- "show entries" or "show records" or "show data" or "show values" in a table → QUERY (they want rows, not schema)
+- "show tables" or "show columns" or "show structure" → SCHEMA_INFO
+
+Return ONLY this JSON:
+{{
+    "reasoning": "brief reasoning",
+    "intent": "QUERY|INSERT|UPDATE|DELETE|DDL|SCHEMA_INFO|UNKNOWN",
+    "confidence": 0.95,
+    "entities": {{
+        "tables": ["table1"],
+        "columns": ["col1"],
+        "conditions": ["condition"],
+        "aggregations": [],
+        "time_range": null,
+        "sort_order": null,
+        "limit": null,
+        "values": {{}}
+    }},
+    "sub_tasks": []
+}}"""
 
         raw = _call_groq_with_retry(
             self.client,
-            self.model,
+            selected_model,
             [
                 {
                     "role": "system",
                     "content": (
-                        "You are a senior database engineer. You MUST reason step-by-step "
-                        "before classifying intent. Output ONLY valid JSON."
+                        "You are a database engineer. Classify the query intent and extract entities. "
+                        "Output ONLY valid JSON."
                     ),
                 },
                 {"role": "user", "content": prompt},
             ],
             temperature=0.05,
-            max_tokens=900,
+            max_tokens=600,  # reduced from 800
         )
 
         if not raw:
@@ -183,7 +398,6 @@ class NLPProcessor:
             logger.warning(f"[NLPProcessor] Could not parse JSON from: {raw[:200]}")
             return self._fallback_intent(query)
 
-        # Validate intent
         intent = result.get("intent", INTENT_UNKNOWN)
         if intent not in VALID_INTENTS:
             intent = INTENT_UNKNOWN
@@ -194,11 +408,11 @@ class NLPProcessor:
         sub_tasks = result.get("sub_tasks", [])
 
         logger.info(
-            f"[NLPProcessor] Intent={intent} confidence={confidence:.2f} "
-            f"sub_tasks={len(sub_tasks)}"
+            f"[NLPProcessor] LLM intent={intent} confidence={confidence:.2f} "
+            f"model={selected_model.split('-')[0]} sub_tasks={len(sub_tasks)}"
         )
 
-        return {
+        final_result = {
             "intent": intent,
             "confidence": confidence,
             "entities": entities,
@@ -206,6 +420,10 @@ class NLPProcessor:
             "sub_tasks": sub_tasks,
             "resolved_query": resolved_query,
         }
+
+        # Cache the result for future identical queries
+        self._cache_set(cache_key, final_result)
+        return final_result
 
     # ------------------------------------------------------------------
     # Entity extraction
@@ -254,6 +472,18 @@ class NLPProcessor:
     # ------------------------------------------------------------------
     # Coreference resolution
     # ------------------------------------------------------------------
+
+    # Narrowed: only *clear* cross-turn pronoun references trigger resolution.
+    # Words like "it", "that", "this", "where", "which" are too common in standalone
+    # queries (e.g. "show all orders where status = 'shipped'") and cause false positives.
+    PRONOUN_PATTERNS = re.compile(
+        r'\b(they|them|their|those|these|him|her|his|hers)\b',
+        re.I
+    )
+
+    def _needs_coreference(self, query: str) -> bool:
+        """Quick check if query likely needs coreference resolution."""
+        return bool(self.PRONOUN_PATTERNS.search(query))
 
     def _resolve_coreferences(
         self,

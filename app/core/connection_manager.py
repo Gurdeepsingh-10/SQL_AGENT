@@ -87,13 +87,21 @@ class ConnectionManager:
         
         # Create new engine
         logger.info(f"Creating new engine for connection {connection_id}")
+        
+        # Add connection timeout for Postgres (especially needed for Neon scale-to-zero wakeups)
+        connect_args = {}
+        if "postgresql" in connection_url:
+            connect_args["connect_timeout"] = 10
+            connect_args["options"] = "-c statement_timeout=30000"  # 30s query timeout
+            
         engine = create_engine(
             connection_url,
             pool_size=5,
             max_overflow=10,
             pool_pre_ping=True,
-            pool_recycle=3600,
-            echo=settings.DEBUG
+            pool_recycle=280,  # 280s recycle to avoid Neon 5-min idle timeouts
+            echo=settings.DEBUG,
+            connect_args=connect_args
         )
         
         # Cache it

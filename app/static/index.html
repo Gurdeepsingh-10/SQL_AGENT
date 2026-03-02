@@ -441,9 +441,16 @@
     <div id="connection-modal" class="auth-overlay hidden">
         <div class="card auth-box">
             <h2>add db connection</h2>
+            <p style="font-size: 0.8rem; opacity: 0.65; margin-bottom: 12px;">
+                Your connection is encrypted and saved to your account permanently.
+            </p>
             <form id="connection-form">
                 <input type="text" id="conn-name" placeholder="connection name (e.g. sales db)" required>
                 <input type="text" id="conn-url" placeholder="sqlalchemy url (postgresql://...)" required>
+                <label style="display: flex; align-items: center; gap: 8px; font-size: 0.85rem; margin-bottom: 10px; cursor: pointer;">
+                    <input type="checkbox" id="conn-default" checked style="width: auto; margin: 0;">
+                    Set as default (auto-connect on login)
+                </label>
                 <div style="display: flex; gap: 10px;">
                     <button type="submit">save</button>
                     <button type="button" class="secondary" id="close-conn-modal">cancel</button>

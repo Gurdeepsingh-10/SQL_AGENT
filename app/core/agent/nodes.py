@@ -48,6 +48,39 @@ sql_gen = SQLGenerator()
 
 MAX_RE_REASONING_ATTEMPTS = 2  # Max SQL re-generation attempts on schema errors
 
+# ---------------------------------------------------------------------------
+# Per-engine SchemaInspector + SQLValidator cache
+# Avoids re-fetching the database schema on every validate_sql / execute_sql call.
+# Keyed by id(engine) since engine objects are reused per connection.
+# ---------------------------------------------------------------------------
+
+_inspector_cache: Dict[int, SchemaInspector] = {}
+_validator_cache: Dict[int, Any] = {}
+
+
+def _get_cached_inspector(engine) -> SchemaInspector:
+    """Return a cached SchemaInspector for the given engine, or create one."""
+    key = id(engine)
+    if key not in _inspector_cache:
+        _inspector_cache[key] = SchemaInspector(engine)
+        # Limit cache size (prevent memory leak after many connection changes)
+        if len(_inspector_cache) > 50:
+            oldest = next(iter(_inspector_cache))
+            del _inspector_cache[oldest]
+            if oldest in _validator_cache:
+                del _validator_cache[oldest]
+    return _inspector_cache[key]
+
+
+def _get_cached_validator(engine) -> Any:
+    """Return a cached SQLValidator for the given engine."""
+    from app.core.agent.validator import SQLValidator as _SQLValidator
+    key = id(engine)
+    if key not in _validator_cache:
+        inspector = _get_cached_inspector(engine)
+        _validator_cache[key] = _SQLValidator(inspector)
+    return _validator_cache[key]
+
 
 # ---------------------------------------------------------------------------
 # Helper: extract conversation history for NLP context
@@ -61,6 +94,28 @@ def _extract_history(messages: List[Any]) -> List[Dict[str, str]]:
             role = "assistant" if hasattr(msg, "type") and msg.type == "ai" else "user"
             history.append({"role": role, "content": str(msg.content)[:500]})
     return history
+
+
+def _get_last_sql_from_history(messages: List[Any]) -> Optional[str]:
+    """Extract the most recently executed SQL from message history.
+
+    This is used to give the SQL generator context about the previous operation
+    when handling follow-up queries like 'show me the rows that were affected'.
+    We scan backwards through messages looking for content that starts with a SQL keyword.
+    """
+    sql_keywords = ("SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP")
+    for msg in reversed(messages):
+        content = ""
+        if hasattr(msg, "content"):
+            content = str(msg.content)
+        elif isinstance(msg, dict):
+            content = str(msg.get("content", ""))
+        # Check if any line looks like SQL
+        for line in content.strip().splitlines():
+            stripped = line.strip().upper()
+            if any(stripped.startswith(kw) for kw in sql_keywords):
+                return content.strip()[:600]
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -99,10 +154,6 @@ def parse_intent(state: AgentState) -> Dict[str, Any]:
     reasoning = intent_result.get("reasoning", "")
     sub_tasks = intent_result.get("sub_tasks", [])
     resolved_query = intent_result.get("resolved_query", query)
-
-    # Extract entities if not already done by classify_intent
-    if intent != "UNKNOWN" and not entities:
-        entities = nlp.extract_entities(resolved_query, intent, schema_context, history)
 
     logger.info(
         f"[parse_intent] intent={intent} confidence={confidence:.2f} "
@@ -179,6 +230,21 @@ def generate_sql(state: AgentState) -> Dict[str, Any]:
         except Exception:
             pass
 
+    # Determine if we should prune the schema context to save tokens and improve speed.
+    # We use the tables identified in the intent parsing phase.
+    relevant_tables = entities.get("tables", [])
+    if relevant_tables and engine:
+        try:
+            inspector = _get_cached_inspector(engine)
+            # This returns a pruned schema context including only identified tables + neighbors
+            schema_context = inspector.get_schema_context_for_llm(relevant_tables)
+            logger.info(
+                f"[generate_sql] Using pruned schema context "
+                f"({len(relevant_tables)} tables + neighbors)"
+            )
+        except Exception as e:
+            logger.warning(f"[generate_sql] Schema pruning failed, falling back to full: {e}")
+
     # If this is a re-reasoning attempt, enrich the query with correction hints
     correction_hint = ""
     if re_attempt > 0 and schema_errors:
@@ -219,6 +285,7 @@ def generate_sql(state: AgentState) -> Dict[str, Any]:
         schema_context=schema_context,
         dialect=dialect,
         reasoning=reasoning,
+        last_sql_context=_get_last_sql_from_history(state.get("messages", [])),
     )
 
     sql_query = result.get("sql")
@@ -274,8 +341,8 @@ def validate_sql(state: AgentState) -> Dict[str, Any]:
     if not engine:
         return {"error": "Database engine not available in context"}
 
-    inspector = SchemaInspector(engine)
-    validator = SQLValidator(inspector)
+    # Use cached inspector + validator — avoids DB schema re-fetch on every call
+    validator = _get_cached_validator(engine)
 
     validation = validator.validate(sql_query, state.get("intent"))
 
@@ -321,7 +388,7 @@ def validate_sql(state: AgentState) -> Dict[str, Any]:
             "sql_query": None,
             "messages": [
                 AIMessage(
-                    content=f"The query failed security validation: {error_msg}"
+                    content=error_msg
                 )
             ],
         }
@@ -357,6 +424,7 @@ def execute_sql(state: AgentState) -> Dict[str, Any]:
     if not engine:
         return {"error": "Database engine not available in context"}
 
+    # Reuse executor (stateless — safe to cache per engine)
     executor = SQLExecutor(engine)
     result = executor.execute_query(sql_query)
 
@@ -382,22 +450,28 @@ def execute_sql(state: AgentState) -> Dict[str, Any]:
     intent = state.get("intent", "QUERY")
     connection_id = state.get("db_connection_id")
 
-    # CRITICAL: Invalidate schema cache after DDL operations.
-    # After CREATE/ALTER/DROP, the schema has changed and the cached snapshot
-    # is stale. Force re-fetch on the next request so the agent sees the new schema.
-    if intent == "DDL":
+    # After DML (INSERT/UPDATE/DELETE), force the schema inspector to
+    # re-count rows. This ensures the schema display shows accurate row counts
+    # instead of stale '0 rows' after inserts.
+    if intent in ("DDL", "INSERT", "UPDATE", "DELETE"):
         if connection_id:
             memory_manager.invalidate_schema_snapshot(connection_id)
-            logger.info(
-                f"[execute_sql] DDL executed — invalidated schema cache "
-                f"for connection {connection_id}"
-            )
-        # Also clear the SchemaInspector in-memory cache
-        try:
-            inspector = SchemaInspector(engine)
-            inspector.clear_cache()
-        except Exception:
-            pass
+        if engine:
+            key = id(engine)
+            if key in _inspector_cache:
+                # Only clear the internal row count cache, not the full schema
+                # (DDL also clears column structure)
+                if intent == "DDL":
+                    _inspector_cache[key].clear_cache()
+                    del _inspector_cache[key]
+                    if key in _validator_cache:
+                        del _validator_cache[key]
+                else:
+                    # Use the dedicated method that busts all cache layers
+                    # (TTL + fingerprint) so the next schema request returns
+                    # accurate row counts after DML.
+                    _inspector_cache[key].clear_row_count_cache()
+                logger.info(f"[execute_sql] {intent} — schema cache busted, row counts will refresh")
 
     # Record successful pattern in long-term memory
     if connection_id:
@@ -425,17 +499,16 @@ def execute_sql(state: AgentState) -> Dict[str, Any]:
 def get_schema_info(state: AgentState) -> Dict[str, Any]:
     """
     Node: Return detailed schema information to the user.
-
-    Enhancements:
-    - Uses upgraded SchemaInspector with FK relationships
-    - Includes indexed columns for query optimization hints
-    - Caches schema in MemoryManager
+    Uses the shared cached inspector — schema is already in memory from
+    the agent.py route handler, so get_full_schema() returns immediately
+    from the TTL cache with zero DB queries.
     """
     engine = current_engine_cv.get()
     if not engine:
         return {"error": "Database engine not available"}
 
-    inspector = SchemaInspector(engine)
+    # Reuse the cached inspector — avoids a second full schema rebuild
+    inspector = _get_cached_inspector(engine)
     schema = inspector.get_full_schema()
     tables = list(schema["tables"].keys())
 
