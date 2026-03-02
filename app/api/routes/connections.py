@@ -63,11 +63,18 @@ async def add_connection(
         )
     
     # If this is set as default, unset other defaults
-    if connection_data.is_default:
+    # Also auto-default if this is the user's FIRST connection
+    existing_count = db.query(UserConnection).filter(
+        UserConnection.user_id == current_user.id,
+        UserConnection.is_active == True
+    ).count()
+
+    if connection_data.is_default or existing_count == 0:
         db.query(UserConnection).filter(
             UserConnection.user_id == current_user.id,
             UserConnection.is_default == True
         ).update({"is_default": False})
+        connection_data.is_default = True
     
     # Encrypt the connection URL
     encrypted_url = connection_manager.encrypt_connection_url(connection_data.connection_url)
