@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     # Groq Configuration
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "llama3-70b-8192"  # Default to Llama 3 70B
+    GROQ_FAST_MODEL: str = "llama-3.1-8b-instant"  # Faster model for simple queries
     
     # Application Settings
     APP_NAME: str = "AI SQL Agent"
