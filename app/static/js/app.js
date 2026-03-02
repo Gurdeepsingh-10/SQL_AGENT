@@ -174,8 +174,8 @@ document.addEventListener("DOMContentLoaded", () => {
         logoutBtnNav.addEventListener("click", () => {
             token = null;
             localStorage.removeItem("sql_agent_token");
-            // Also clear the saved connection so the next user starts fresh
-            localStorage.removeItem("sql_agent_connection_id");
+            // NOTE: We intentionally keep sql_agent_connection_id in localStorage
+            // so it auto-restores when the user logs back in.
             location.reload();
         });
     }
@@ -449,6 +449,7 @@ connectionForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     const name = document.getElementById("conn-name").value;
     const url = document.getElementById("conn-url").value;
+    const setDefault = document.getElementById("conn-default")?.checked ?? true;
     const submitBtn = document.querySelector("#connection-form button[type='submit']");
 
     submitBtn.disabled = true;
@@ -464,7 +465,7 @@ connectionForm.addEventListener("submit", async (e) => {
             body: JSON.stringify({
                 connection_name: name,
                 connection_url: url,
-                is_default: false
+                is_default: setDefault
             })
         });
 
@@ -473,8 +474,11 @@ connectionForm.addEventListener("submit", async (e) => {
         if (response.ok) {
             connectionModal.classList.add("hidden");
             document.getElementById("connection-form").reset();
-            fetchConnections();
-            addMessage("agent", `Connection '${name}' added successfully.`);
+            // Persist this connection so it auto-selects on next login
+            localStorage.setItem("sql_agent_connection_id", data.id);
+            currentConnectionId = data.id;
+            await fetchConnections();
+            addMessage("agent", `✅ Connection '${name}' saved. It will auto-connect on your next login.`);
         } else {
             alert(data.detail || "Failed to add connection");
         }
@@ -518,10 +522,27 @@ chatForm.addEventListener("submit", async (e) => {
             })
         });
 
-        const data = await response.json();
+        const data = await response.json().catch(() => ({}));
 
         const loadingMsg = document.querySelector(`[data-id="${loadingId}"]`);
         if (loadingMsg) loadingMsg.remove();
+
+        // Handle HTTP-level errors first (before reading data.success)
+        if (response.status === 401) {
+            addMessage("agent", "⚠️ Your session has expired. Please log in again.");
+            token = null;
+            localStorage.removeItem("sql_agent_token");
+            setTimeout(() => location.reload(), 1500);
+            return;
+        }
+        if (response.status === 403) {
+            addMessage("agent", "⛔ Access denied. You do not have permission to perform this action.");
+            return;
+        }
+        if (response.status >= 500) {
+            addMessage("agent", "🔴 The server encountered an internal error. Please try again in a moment.");
+            return;
+        }
 
         if (data.success) {
             if (Array.isArray(data.results) && data.results.length > 0) {
@@ -531,15 +552,15 @@ chatForm.addEventListener("submit", async (e) => {
                 addMessage("agent", data.message);
             }
         } else {
-            let errorMsg = data.message || "Unknown error";
-            if (data.error) errorMsg += `\nDetails: ${data.error}`;
+            let errorMsg = data.message || "The query could not be completed.";
+            if (data.error && data.error !== data.message) errorMsg += `\nDetails: ${data.error}`;
             addMessage("agent", errorMsg);
         }
 
     } catch (err) {
         const loadingMsg = document.querySelector(`[data-id="${loadingId}"]`);
         if (loadingMsg) loadingMsg.remove();
-        addMessage("agent", "System Error: Failed to reach backend.");
+        addMessage("agent", "🔴 System Error: Failed to reach backend.");
         console.error(err);
     }
 });
@@ -549,9 +570,11 @@ function addMessage(role, content, extraHtml = null) {
     div.className = `message ${role}`;
 
     let formattedContent = content
-        .replace(/\n/g, "<br>")
-        .replace(/```sql(.*?)```/gs, "<pre><code>$1</code></pre>")
-        .replace(/```(.*?)```/gs, "<pre><code>$1</code></pre>");
+        .replace(/```sql([\s\S]*?)```/g, "<pre><code>$1</code></pre>")
+        .replace(/```([\s\S]*?)```/g, "<pre><code>$1</code></pre>")
+        .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
+        .replace(/`([^`]+)`/g, "<code style='background:var(--input-bg);padding:1px 4px;border-radius:3px'>$1</code>")
+        .replace(/\n/g, "<br>");
 
     div.innerHTML = `<div class="message-content">${formattedContent}</div>`;
 
