@@ -246,6 +246,7 @@ async def process_query(
             intent=intent,
             generated_sql=sql_query,
             results=sql_results,
+            chart_config=result_state.get("chart_config"),
             result_count=len(sql_results) if sql_results else 0,
             execution_time=execution_time,
             message=final_message
