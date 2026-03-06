@@ -7,6 +7,11 @@ from pydantic import field_validator
 from pydantic_settings import BaseSettings
 from typing import List, Any
 import json
+import os
+from dotenv import load_dotenv
+
+# Explicitly load .env into os.environ for external libraries like LangChain
+load_dotenv()
 
 
 class Settings(BaseSettings):
@@ -24,6 +29,11 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "llama3-70b-8192"  # Default to Llama 3 70B
     GROQ_FAST_MODEL: str = "llama-3.1-8b-instant"  # Faster model for simple queries
+    
+    # LangSmith Observability
+    LANGCHAIN_TRACING_V2: str = "false"
+    LANGCHAIN_API_KEY: str = ""
+    LANGCHAIN_PROJECT: str = "sql-agent"
     
     # Application Settings
     APP_NAME: str = "AI SQL Agent"
