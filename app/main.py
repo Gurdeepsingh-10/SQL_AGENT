@@ -6,10 +6,12 @@ from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+from sqlalchemy import text
 from app.config import settings
 from app.database import init_db
 from app.core.middleware import log_requests_middleware, error_handler_middleware, setup_cors
-from app.api.routes import auth, agent, database, connections, dashboard
+from app.api.routes import auth, agent, database, connections, dashboard, agent_streaming
 from app.utils.logger import get_logger
 
 # ── Rate Limiting ─────────────────────────────────────────────────────────
@@ -45,10 +47,12 @@ setup_cors(app)
 # Add middleware
 app.middleware("http")(log_requests_middleware)
 app.middleware("http")(error_handler_middleware)
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # Include routers
 app.include_router(auth.router)
 app.include_router(agent.router)
+app.include_router(agent_streaming.router)
 app.include_router(database.router)
 app.include_router(connections.router)  # Already has /connections prefix
 app.include_router(dashboard.router, prefix="/dashboard", tags=["Dashboard"])
@@ -72,6 +76,16 @@ async def startup_event():
     # Initialize database (create tables)
     init_db()
     logger.info("Database initialized")
+    
+    # Warm up database connection pool
+    try:
+        from app.database import engine
+        print("Warming up database connection pool...")
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        logger.info("Database connection pool warmed up")
+    except Exception as e:
+        logger.error(f"Error warming up db pool: {str(e)}")
     
     # Log configuration
     logger.info(f"Database URL: {settings.DATABASE_URL}")
