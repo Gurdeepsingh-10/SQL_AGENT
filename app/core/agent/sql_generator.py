@@ -17,6 +17,7 @@ from typing import Dict, Any, List, Optional
 from app.config import settings
 from app.utils.logger import get_logger
 import hashlib
+import json
 import re
 import time
 
@@ -242,15 +243,33 @@ class SQLGenerator:
 
         # ── Single-pass generation ─────────────────────────────────────────
         candidate = self._pass1_generate(query, intent, entities, schema_context, dialect, reasoning, last_sql_context)
-        if not candidate:
+        
+        sql_query = None
+        chart_config = None
+        
+        if candidate:
+            try:
+                # Try to extract and parse JSON from the LLM's response
+                json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', candidate, re.DOTALL | re.IGNORECASE)
+                json_str = json_match.group(1) if json_match else candidate.strip()
+                parsed = json.loads(json_str)
+                sql_query = parsed.get("sql")
+                chart_config = parsed.get("chart_config")
+            except json.JSONDecodeError:
+                # Fallback if the LLM ignored instructions and returned raw SQL
+                logger.warning("[SQLGenerator] Failed to parse JSON, falling back to raw sql cleanup")
+                sql_query = candidate
+        
+        if not sql_query:
             return {
                 "sql": None, "intent": intent, "confidence": 0.0,
                 "reasoning": reasoning, "dialect": dialect, "passes": 1,
                 "requires_parameters": False,
+                "chart_config": None,
                 "error": "Failed to generate SQL candidate",
             }
 
-        final_sql = _clean_sql(candidate, intent=intent, dialect=dialect)
+        final_sql = _clean_sql(sql_query, intent=intent, dialect=dialect)
 
         logger.info(
             f"[SQLGenerator] Generated SQL (dialect={dialect}): "
@@ -271,6 +290,7 @@ class SQLGenerator:
             "dialect": dialect,
             "passes": 1,
             "requires_parameters": self._check_requires_parameters(final_sql),
+            "chart_config": chart_config,
             "error": None,
         }
 
@@ -480,12 +500,18 @@ CRITICAL: Only use table and column names that exist in the provided schema.
 For batch INSERT requests (e.g., "add 10 records"):
   - Generate diverse, realistic fictional values. NEVER reuse the same name, date, or email.
   - MANDATORY for PostgreSQL: End every INSERT statement with ON CONFLICT DO NOTHING to skip duplicates.
-  - Example format:
+    - Example format:
     INSERT INTO table (col1, col2) VALUES
       ('UniqueValue1', '1985-03-15'),
       ('UniqueValue2', '1978-07-22')
     ON CONFLICT DO NOTHING;
-Return ONLY the SQL. No explanations. No markdown code fences."""
+
+MANDATORY: You MUST return your response as a valid JSON object. Do NOT include markdown code fences around the JSON, just the raw JSON.
+The JSON must follow this structure exactly:
+{{
+  "sql": "your generated sql query here",
+  "chart_config": null
+}}"""
 
     def _build_generation_prompt(
         self,
@@ -520,7 +546,16 @@ Extracted Entities:
 {entities_text}
 
 Generate the SQL query that fulfills this request.
-Return ONLY the SQL query."""
+
+If the user's Natural Language Query explicitly asks for a visual representation (e.g. "chart", "graph", "plot", "pie", "bar", "distribution"), 
+you MUST also generate a valid Chart.js configuration object in the 'chart_config' field to visualize the data returned by your SQL query. 
+Assume the frontend will pass the SQL results array directly into your chart configuration's dataset.
+
+Return ONLY a valid JSON object matching this schema:
+{{
+  "sql": "SELECT ...",
+  "chart_config": null | {{ <Valid Chart.js Config Object> }}
+}}"""
 
     @staticmethod
     def _format_entities(entities: Dict[str, Any]) -> str:
