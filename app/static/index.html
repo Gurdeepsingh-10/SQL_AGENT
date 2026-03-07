@@ -13,6 +13,9 @@
         rel="stylesheet">
     <!-- Styles -->
     <link rel="stylesheet" href="/static/css/style.css">
+
+    <!-- Charting Library -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 
 <body>
@@ -24,6 +27,7 @@
             <div class="navbar-links">
                 <a href="#" class="nav-link" data-target="hero">home</a>
                 <a href="#" class="nav-link" data-target="app">playground</a>
+                <a href="#" class="nav-link" data-target="dashboard">dashboard</a>
                 <a href="#" class="nav-link" data-target="about">about</a>
             </div>
             <div class="navbar-actions">
@@ -277,6 +281,239 @@
     </section>
     <!-- end #hero-section -->
 
+    <!-- ═══════════════════════════════════════
+         DASHBOARD SECTION
+    ════════════════════════════════════════ -->
+    <section id="dashboard-section" class="section hidden">
+        <div class="dashboard-container">
+
+            <!-- Dashboard Header & Toggle -->
+            <div class="dashboard-header">
+                <div class="dashboard-title-area">
+                    <h2>System Telemetry</h2>
+                    <span id="dashboard-last-refresh" class="last-refresh-badge"></span>
+                </div>
+                <div class="telemetry-toggle-container">
+                    <span class="toggle-label active" id="label-db-telemetry">Database</span>
+                    <label class="telemetry-switch">
+                        <input type="checkbox" id="telemetry-toggle">
+                        <span class="telemetry-slider"></span>
+                    </label>
+                    <span class="toggle-label" id="label-agent-telemetry">Agent</span>
+                </div>
+            </div>
+
+            <!-- VIEW 1: Database Telemetry -->
+            <div id="db-telemetry-view" class="telemetry-view active">
+
+                <!-- KPI row: 5 core DB metrics -->
+                <div class="dashboard-kpi-grid db-kpi-grid">
+                    <div class="kpi-card" id="kpi-tables">
+                        <div class="kpi-icon">🗄️</div>
+                        <div class="kpi-value">--</div>
+                        <div class="kpi-label">Tables</div>
+                    </div>
+                    <div class="kpi-card" id="kpi-rows">
+                        <div class="kpi-icon">📊</div>
+                        <div class="kpi-value">--</div>
+                        <div class="kpi-label">Total Rows</div>
+                    </div>
+                    <div class="kpi-card" id="kpi-size">
+                        <div class="kpi-icon">💾</div>
+                        <div class="kpi-value">--</div>
+                        <div class="kpi-label">DB Size</div>
+                    </div>
+                    <div class="kpi-card" id="kpi-cols">
+                        <div class="kpi-icon">📋</div>
+                        <div class="kpi-value">--</div>
+                        <div class="kpi-label">Total Columns</div>
+                    </div>
+                    <div class="kpi-card" id="kpi-health">
+                        <div class="kpi-icon">💚</div>
+                        <div class="kpi-value" style="color:#22c55e">--</div>
+                        <div class="kpi-label">Status</div>
+                    </div>
+                </div>
+
+                <!-- DB Intel Strip: Secondary stats as a horizontal info bar -->
+                <div class="db-intel-strip" id="db-intel-strip">
+                    <div class="db-intel-item">
+                        <span class="intel-label">🔓 Tables w/o PK</span>
+                        <span class="intel-value" id="intel-no-pk">--</span>
+                    </div>
+                    <div class="db-intel-sep"></div>
+                    <div class="db-intel-item">
+                        <span class="intel-label">🔌 Active Connections</span>
+                        <span class="intel-value" id="intel-conns">--</span>
+                    </div>
+                    <div class="db-intel-sep"></div>
+                    <div class="db-intel-item">
+                        <span class="intel-label">💻 Engine</span>
+                        <span class="intel-value" id="intel-dialect"
+                            style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">--</span>
+                    </div>
+                </div>
+
+                <!-- Chart grid: 2x2 symmetrical -->
+                <div class="dashboard-charts-grid">
+                    <div class="dashboard-chart-card">
+                        <div class="chart-card-header">
+                            <h3>Data Volume</h3>
+                            <span class="chart-subtitle">Rows per table (horizontal)</span>
+                        </div>
+                        <div class="chart-canvas-wrapper">
+                            <canvas id="chart-rows-bar"></canvas>
+                        </div>
+                    </div>
+                    <div class="dashboard-chart-card">
+                        <div class="chart-card-header">
+                            <h3>Table Share</h3>
+                            <span class="chart-subtitle">Proportion of total rows</span>
+                        </div>
+                        <div class="chart-canvas-wrapper">
+                            <canvas id="chart-rows-doughnut"></canvas>
+                        </div>
+                    </div>
+                    <div class="dashboard-chart-card">
+                        <div class="chart-card-header">
+                            <h3>Schema Complexity</h3>
+                            <span class="chart-subtitle">Columns per table (polar area)</span>
+                        </div>
+                        <div class="chart-canvas-wrapper">
+                            <canvas id="chart-columns-bar"></canvas>
+                        </div>
+                    </div>
+                    <div class="dashboard-chart-card">
+                        <div class="chart-card-header">
+                            <h3>PK Coverage</h3>
+                            <span class="chart-subtitle">Integrity health</span>
+                        </div>
+                        <div class="chart-canvas-wrapper">
+                            <canvas id="chart-pk-coverage"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Schema table -->
+                <div class="dashboard-schema-card">
+                    <div class="chart-card-header">
+                        <h3>Schema Overview</h3>
+                        <button id="dashboard-refresh-btn" class="refresh-btn" title="Refresh now">↻ Refresh</button>
+                    </div>
+                    <div id="db-schema-chart-container" class="schema-list-area">
+                        <span style="opacity:0.4">Connect a database to view telemetry.</span>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- VIEW 2: Agent Telemetry -->
+            <div id="agent-telemetry-view" class="telemetry-view hidden">
+
+                <!-- Agent KPI row: 8 cards in strict 4x2 grid -->
+                <div class="dashboard-kpi-grid agent-kpi-grid">
+                    <div class="kpi-card">
+                        <div class="kpi-icon">⚡</div>
+                        <div class="kpi-value" id="kpi-latency">--</div>
+                        <div class="kpi-label">Avg Latency</div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-icon">🏆</div>
+                        <div class="kpi-value" id="kpi-peak-latency">--</div>
+                        <div class="kpi-label">Peak Latency</div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-icon">🔢</div>
+                        <div class="kpi-value" id="kpi-total-queries">--</div>
+                        <div class="kpi-label">Total Queries</div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-icon">✅</div>
+                        <div class="kpi-value" id="kpi-success-rate">--</div>
+                        <div class="kpi-label">Success Rate</div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-icon">🪙</div>
+                        <div class="kpi-value" id="kpi-tokens">--</div>
+                        <div class="kpi-label">Tokens Used</div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-icon">💰</div>
+                        <div class="kpi-value" id="kpi-cost">--</div>
+                        <div class="kpi-label">Est. Cost</div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-icon">📈</div>
+                        <div class="kpi-value" id="kpi-avg-tokens">--</div>
+                        <div class="kpi-label">Avg Tokens/Q</div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-icon">🔗</div>
+                        <div class="kpi-value" id="kpi-langsmith-status">--</div>
+                        <div class="kpi-label">LangSmith</div>
+                    </div>
+                </div>
+
+                <!-- Agent Charts -->
+                <div class="dashboard-charts-grid">
+                    <div class="dashboard-chart-card">
+                        <div class="chart-card-header">
+                            <h3>Success vs Failed</h3>
+                            <span class="chart-subtitle">Query outcomes</span>
+                        </div>
+                        <div class="chart-canvas-wrapper">
+                            <canvas id="chart-success-fail"></canvas>
+                        </div>
+                    </div>
+                    <div class="dashboard-chart-card">
+                        <div class="chart-card-header">
+                            <h3>Intent Distribution</h3>
+                            <span class="chart-subtitle">What users ask for</span>
+                        </div>
+                        <div class="chart-canvas-wrapper">
+                            <canvas id="chart-intent-pie"></canvas>
+                        </div>
+                    </div>
+                    <div class="dashboard-chart-card dashboard-chart-full">
+                        <div class="chart-card-header">
+                            <h3>Latency Trend</h3>
+                            <span class="chart-subtitle">Last 15 queries (seconds)</span>
+                        </div>
+                        <div class="chart-canvas-wrapper chart-canvas-tall">
+                            <canvas id="chart-latency-trend"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Query History Table -->
+                <div class="dashboard-schema-card">
+                    <div class="chart-card-header">
+                        <h3>Recent Query History</h3>
+                        <span class="chart-subtitle">Last 15 interactions</span>
+                    </div>
+                    <div style="overflow-x: auto;">
+                        <table class="query-history-table" id="query-history-table">
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Prompt</th>
+                                    <th>Intent</th>
+                                    <th>Latency</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <!-- JS inserts here -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+            </div>
+
+        </div>
+    </section>
+
     <!-- About Section -->
     <section id="about-section" class="section hidden">
         <div class="about-container">
@@ -447,7 +684,8 @@
             <form id="connection-form">
                 <input type="text" id="conn-name" placeholder="connection name (e.g. sales db)" required>
                 <input type="text" id="conn-url" placeholder="sqlalchemy url (postgresql://...)" required>
-                <label style="display: flex; align-items: center; gap: 8px; font-size: 0.85rem; margin-bottom: 10px; cursor: pointer;">
+                <label
+                    style="display: flex; align-items: center; gap: 8px; font-size: 0.85rem; margin-bottom: 10px; cursor: pointer;">
                     <input type="checkbox" id="conn-default" checked style="width: auto; margin: 0;">
                     Set as default (auto-connect on login)
                 </label>
@@ -456,6 +694,33 @@
                     <button type="button" class="secondary" id="close-conn-modal">cancel</button>
                 </div>
             </form>
+        </div>
+    </div>
+
+    <!-- Confirmation Modal (DDL / DML) -->
+    <div id="confirm-modal" class="auth-overlay hidden">
+        <div class="card auth-box" style="max-width:520px;border:1px solid #f59e0b44;">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+                <span id="confirm-risk-badge"
+                    style="background:#f59e0b22;color:#f59e0b;padding:3px 10px;border-radius:20px;font-size:0.75rem;font-weight:700;letter-spacing:.05em;">
+                    CONFIRM
+                </span>
+                <h3 style="margin:0;font-size:1rem;">Query Needs Approval</h3>
+            </div>
+            <p id="confirm-message" style="font-size:0.85rem;opacity:0.8;margin-bottom:12px;">
+                This query will modify your database. Please review before executing.
+            </p>
+            <pre id="confirm-sql"
+                style="background:var(--bg-secondary,#111);border:1px solid #333;border-radius:8px;padding:12px;font-size:0.78rem;overflow-x:auto;margin-bottom:14px;white-space:pre-wrap;word-break:break-all;max-height:180px;overflow-y:auto;color:#e2e8f0;">
+            </pre>
+            <div style="display:flex;gap:10px;">
+                <button id="confirm-approve-btn" style="background:#16a34a;color:#fff;flex:1;font-weight:600;">
+                    ✓ Approve &amp; Execute
+                </button>
+                <button type="button" id="confirm-cancel-btn" class="secondary" style="flex:1;">
+                    Cancel
+                </button>
+            </div>
         </div>
     </div>
 

@@ -146,8 +146,19 @@ function navigateTo(targetId) {
         }
     });
 
-    if (targetId === 'app' && !token) {
+    if ((targetId === 'app' || targetId === 'dashboard') && !token) {
         showAuth();
+        return; // Stop navigation if unauthenticated
+    }
+
+    if (targetId === 'dashboard' && token && currentConnectionId) {
+        loadDashboardData(currentConnectionId);
+        startDashboardAutoRefresh(currentConnectionId);
+    }
+    // Stop auto-refresh when navigating away
+    if (targetId !== 'dashboard' && _dashboardRefreshTimer) {
+        clearInterval(_dashboardRefreshTimer);
+        _dashboardRefreshTimer = null;
     }
 }
 
@@ -167,6 +178,47 @@ document.addEventListener("DOMContentLoaded", () => {
             navigateTo(link.dataset.target);
         });
     });
+
+    // Dashboard Telemetry Toggle
+    const telemetryToggle = document.getElementById("telemetry-toggle");
+    const labelDb = document.getElementById("label-db-telemetry");
+    const labelAgent = document.getElementById("label-agent-telemetry");
+    const viewDb = document.getElementById("db-telemetry-view");
+    const viewAgent = document.getElementById("agent-telemetry-view");
+
+    if (telemetryToggle) {
+        telemetryToggle.addEventListener("change", (e) => {
+            if (e.target.checked) {
+                // Show Agent Telemetry
+                labelDb.classList.remove("active");
+                labelAgent.classList.add("active");
+                viewDb.classList.remove("active");
+                viewDb.classList.add("hidden");
+                viewAgent.classList.remove("hidden");
+                viewAgent.classList.add("active");
+            } else {
+                // Show DB Telemetry
+                labelAgent.classList.remove("active");
+                labelDb.classList.add("active");
+                viewAgent.classList.remove("active");
+                viewAgent.classList.add("hidden");
+                viewDb.classList.remove("hidden");
+                viewDb.classList.add("active");
+            }
+            // Re-render charts into now-visible canvases (Chart.js needs visible DOM)
+            if (currentConnectionId) {
+                setTimeout(() => loadDashboardData(currentConnectionId), 80);
+            }
+        });
+    }
+
+    // Refresh button on dashboard
+    const dashRefreshBtn = document.getElementById("dashboard-refresh-btn");
+    if (dashRefreshBtn) {
+        dashRefreshBtn.addEventListener("click", () => {
+            if (currentConnectionId) loadDashboardData(currentConnectionId);
+        });
+    }
 
     // Navbar logout
     const logoutBtnNav = document.getElementById("logout-btn-nav");
@@ -494,14 +546,12 @@ connectionForm.addEventListener("submit", async (e) => {
 // ============================================================
 // Chat
 // ============================================================
-chatForm.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const query = chatInput.value.trim();
-    if (!query) return;
+// ── Pending confirmation state ───────────────────────────────────────────────
+let _pendingConfirmQuery = null;
+let _pendingConfirmSQL = null;
 
-    addMessage("user", query);
-    chatInput.value = "";
-
+// ── Send a query (core function — reused by chat + confirmation modal) ────────
+async function _sendQuery(queryText, confirmed = false) {
     if (!currentConnectionId) {
         addMessage("agent", "Error: No database connection selected.");
         return;
@@ -517,39 +567,80 @@ chatForm.addEventListener("submit", async (e) => {
                 "Content-Type": "application/json"
             },
             body: JSON.stringify({
-                query: query,
-                connection_id: currentConnectionId
+                query: queryText,
+                connection_id: currentConnectionId,
+                confirmed: confirmed,
             })
         });
 
         const data = await response.json().catch(() => ({}));
-
         const loadingMsg = document.querySelector(`[data-id="${loadingId}"]`);
         if (loadingMsg) loadingMsg.remove();
 
-        // Handle HTTP-level errors first (before reading data.success)
         if (response.status === 401) {
             addMessage("agent", "⚠️ Your session has expired. Please log in again.");
-            token = null;
-            localStorage.removeItem("sql_agent_token");
-            setTimeout(() => location.reload(), 1500);
-            return;
+            token = null; localStorage.removeItem("sql_agent_token");
+            setTimeout(() => location.reload(), 1500); return;
         }
-        if (response.status === 403) {
-            addMessage("agent", "⛔ Access denied. You do not have permission to perform this action.");
-            return;
-        }
-        if (response.status >= 500) {
-            addMessage("agent", "🔴 The server encountered an internal error. Please try again in a moment.");
+        if (response.status === 403) { addMessage("agent", "⛔ Access denied."); return; }
+        if (response.status >= 500) { addMessage("agent", "🔴 Server error. Please try again."); return; }
+
+        // ── Confirmation required ───────────────────────────────────────────────
+        if (data.requires_confirmation && data.pending_sql) {
+            _pendingConfirmQuery = queryText;
+            _pendingConfirmSQL = data.pending_sql;
+            // Show modal
+            document.getElementById('confirm-sql').textContent = data.pending_sql;
+            document.getElementById('confirm-message').textContent =
+                data.message || 'This query will modify your database.';
+            const badge = document.getElementById('confirm-risk-badge');
+            if (badge) {
+                const isDanger = data.message && data.message.includes('permanently');
+                badge.textContent = isDanger ? 'DANGER' : 'CONFIRM';
+                badge.style.background = isDanger ? '#ef444422' : '#f59e0b22';
+                badge.style.color = isDanger ? '#ef4444' : '#f59e0b';
+            }
+            document.getElementById('confirm-modal').classList.remove('hidden');
             return;
         }
 
         if (data.success) {
             if (Array.isArray(data.results) && data.results.length > 0) {
-                const tableHtml = createTableFromResults(data.results);
-                addMessage("agent", data.message, tableHtml);
+                let extraHtml = createTableFromResults(data.results);
+                if (data.chart_config) {
+                    const canvasId = `chart-${Date.now()}`;
+                    extraHtml = `<div class="chart-container" style="position:relative;height:35vh;width:100%;margin-bottom:20px;background:var(--panel-bg);padding:10px;border-radius:8px;"><canvas id="${canvasId}"></canvas></div>` + extraHtml;
+                    addMessage("agent", data.message, extraHtml);
+                    setTimeout(() => {
+                        const ctx2 = document.getElementById(canvasId);
+                        if (ctx2) {
+                            try {
+                                let cfg = data.chart_config;
+                                if (!cfg.data) cfg.data = { labels: [], datasets: [{ data: [] }] };
+                                const keys = Object.keys(data.results[0]);
+                                if (keys.length >= 2 && (!cfg.data.labels || !cfg.data.labels.length)) {
+                                    cfg.data.labels = data.results.map(r => String(r[keys[0]]));
+                                    if (cfg.data.datasets?.length) {
+                                        cfg.data.datasets[0].data = data.results.map(r => Number(r[keys[1]]));
+                                        cfg.data.datasets[0].backgroundColor = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4'].map(c => c + 'aa');
+                                    }
+                                }
+                                if (!cfg.options) cfg.options = {};
+                                cfg.options.responsive = true; cfg.options.maintainAspectRatio = false;
+                                new Chart(ctx2, cfg);
+                            } catch (ce) { console.error('Chart error:', ce); }
+                        }
+                    }, 50);
+                } else {
+                    addMessage("agent", data.message, extraHtml);
+                }
             } else {
                 addMessage("agent", data.message);
+            }
+            // ── Active dashboard refresh ───────────────────────────────────────────
+            // Fire in background so the dashboard stays live after every query
+            if (currentConnectionId) {
+                setTimeout(() => loadDashboardData(currentConnectionId), 600);
             }
         } else {
             let errorMsg = data.message || "The query could not be completed.";
@@ -558,12 +649,40 @@ chatForm.addEventListener("submit", async (e) => {
         }
 
     } catch (err) {
-        const loadingMsg = document.querySelector(`[data-id="${loadingId}"]`);
-        if (loadingMsg) loadingMsg.remove();
+        const loadingMsg2 = document.querySelector(`[data-id="${loadingId}"]`);
+        if (loadingMsg2) loadingMsg2.remove();
         addMessage("agent", "🔴 System Error: Failed to reach backend.");
         console.error(err);
     }
+}
+
+// ── Confirmation modal buttons ────────────────────────────────────────────────
+document.getElementById('confirm-approve-btn')?.addEventListener('click', async () => {
+    document.getElementById('confirm-modal').classList.add('hidden');
+    if (_pendingConfirmQuery) {
+        addMessage("user", "✓ Approved — executing query");
+        await _sendQuery(_pendingConfirmQuery, true);
+        _pendingConfirmQuery = null; _pendingConfirmSQL = null;
+    }
 });
+document.getElementById('confirm-cancel-btn')?.addEventListener('click', () => {
+    document.getElementById('confirm-modal').classList.add('hidden');
+    addMessage("agent", "❌ Execution cancelled. No changes were made.");
+    _pendingConfirmQuery = null; _pendingConfirmSQL = null;
+});
+
+// ── Chat form submit ──────────────────────────────────────────────────────────
+chatForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const query = chatInput.value.trim();
+    if (!query) return;
+    addMessage("user", query);
+    chatInput.value = "";
+    await _sendQuery(query);
+});
+
+
+
 
 function addMessage(role, content, extraHtml = null) {
     const div = document.createElement("div");
@@ -610,4 +729,440 @@ function createTableFromResults(results) {
 
     html += `</tbody></table></div>`;
     return html;
+}
+
+// ============================================================
+// Dashboard Telemetry — Real-time Auto-Rendering Engine
+// ============================================================
+
+// Track all chart instances — destroy & recreate on every reload
+const _charts = {};
+let _dashboardRefreshTimer = null;
+
+/**
+ * Stable deterministic color from a string (table name).
+ * Same string ALWAYS produces the same colour — no more legend shuffling.
+ */
+function tableColor(str) {
+    const palette = [
+        '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6',
+        '#06b6d4', '#f97316', '#84cc16', '#ec4899', '#6366f1',
+        '#14b8a6', '#a78bfa', '#fb923c', '#4ade80', '#f43f5e',
+    ];
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) hash = (hash * 31 + str.charCodeAt(i)) | 0;
+    return palette[Math.abs(hash) % palette.length];
+}
+
+const SUCCESS_COLORS = { ok: '#10b981cc', fail: '#ef4444cc' };
+
+// Shared Chart.js option presets
+const _gridOpts = (axis) => axis === 'y'
+    ? { beginAtZero: true, grid: { color: 'rgba(128,128,128,0.1)' }, ticks: { color: '#9ca3af' } }
+    : { grid: { display: false }, ticks: { color: '#9ca3af' } };
+
+const _baseOpts = (extra = {}) => ({
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: { duration: 500 },
+    plugins: { legend: { display: false } },
+    ...extra
+});
+
+function _mkChart(id, cfg) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (_charts[id]) { _charts[id].destroy(); }
+    _charts[id] = new Chart(el, cfg);
+}
+
+function _destroyAllCharts() {
+    Object.values(_charts).forEach(c => { try { c.destroy(); } catch (e) { } });
+    Object.keys(_charts).forEach(k => delete _charts[k]);
+}
+
+function _setKpi(id, value, extraStyle = '') {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const v = el.querySelector('.kpi-value') || el;
+    v.innerHTML = value;
+    if (extraStyle) v.style.cssText += extraStyle;
+}
+
+function _spinner(ids) {
+    ids.forEach(id => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const v = el.querySelector('.kpi-value') || el;
+        v.innerHTML = "<span class='blink'>…</span>";
+    });
+}
+
+// ── Main loader ──────────────────────────────────────────────────────────────
+async function loadDashboardData(connectionId) {
+    if (!connectionId) return;
+
+    // Spinner all KPIs
+    _spinner([
+        'kpi-tables', 'kpi-rows', 'kpi-size', 'kpi-cols', 'kpi-health',
+        'kpi-latency', 'kpi-peak-latency', 'kpi-total-queries',
+        'kpi-success-rate', 'kpi-tokens', 'kpi-cost', 'kpi-avg-tokens', 'kpi-langsmith-status',
+    ]);
+    // Also pulse the intel strip values
+    ['intel-no-pk', 'intel-conns', 'intel-dialect'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.innerHTML = "<span class='blink'>…</span>";
+    });
+
+    await Promise.all([
+        _loadDbTelemetry(connectionId),
+        _loadAgentTelemetry(connectionId),
+    ]);
+
+    const badge = document.getElementById("dashboard-last-refresh");
+    if (badge) badge.textContent = `Updated ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+}
+
+// ── DB Telemetry ─────────────────────────────────────────────────────────────
+async function _loadDbTelemetry(connectionId) {
+    try {
+        const res = await fetch(`${API_BASE}/dashboard/${connectionId}/db-telemetry`, {
+            headers: { "Authorization": `Bearer ${token}` }
+        });
+        if (!res.ok) return;
+        const d = await res.json();
+        if (!d.success) return;
+
+        const m = d.metrics;
+
+        // ── Core 5 KPI cards ────────────────────────────────────────────────
+        _setKpi('kpi-tables', m.total_tables ?? '--');
+        _setKpi('kpi-rows', m.total_rows != null ? Number(m.total_rows).toLocaleString() : '--');
+        _setKpi('kpi-size', m.db_size ?? '--');
+        _setKpi('kpi-cols', m.total_columns ?? '--');
+        const healthEl = document.getElementById('kpi-health')?.querySelector('.kpi-value');
+        if (healthEl) {
+            healthEl.textContent = m.status ?? 'Unknown';
+            healthEl.style.color = m.status === 'Healthy' ? '#22c55e' : '#ef4444';
+        }
+
+        // ── DB Intel strip (horizontal info bar) ────────────────────────────
+        const setIntel = (id, val) => {
+            const el = document.getElementById(id);
+            if (el) el.textContent = val ?? '--';
+        };
+        setIntel('intel-no-pk', `${m.tables_no_pk ?? '--'} of ${m.total_tables ?? '--'} tables`);
+        setIntel('intel-conns', `${m.active_connections ?? '--'} / ${m.pool_size ?? '--'} pool`);
+        // Show first 40 chars of dialect version (can be long pg version string)
+        const dialectFull = m.dialect_version ?? '--';
+        setIntel('intel-dialect', dialectFull.length > 42 ? dialectFull.substring(0, 40) + '…' : dialectFull);
+
+        // ── Chart data setup ─────────────────────────────────────────────────
+        const schemaDetails = d.schema_details || {};
+        const tableNames = Object.keys(schemaDetails);
+        const rowCounts = tableNames.map(t => schemaDetails[t].row_count ?? 0);
+        const colCounts = tableNames.map(t => schemaDetails[t].col_count ?? 0);
+        const colors = tableNames.map(t => tableColor(t)); // stable per name
+
+        // ① Horizontal Bar — Data Volume ──────────────────────────────────
+        _mkChart('chart-rows-bar', {
+            type: 'bar',
+            data: {
+                labels: tableNames,
+                datasets: [{
+                    label: 'Rows', data: rowCounts,
+                    backgroundColor: colors.map(c => c + 'cc'),
+                    borderColor: colors, borderWidth: 2, borderRadius: 6,
+                }]
+            },
+            options: {
+                ..._baseOpts(),
+                indexAxis: 'y',   // ← horizontal
+                plugins: {
+                    legend: { display: false },
+                    tooltip: { callbacks: { label: ctx => ` ${ctx.parsed.x.toLocaleString()} rows` } }
+                },
+                scales: {
+                    x: { ..._gridOpts('y'), beginAtZero: true },
+                    y: { grid: { display: false }, ticks: { color: '#9ca3af', font: { size: 11 } } }
+                }
+            }
+        });
+
+        // ② Doughnut — Table Share ──────────────────────────────────────────
+        const totalRows = rowCounts.reduce((a, b) => a + b, 0);
+        if (totalRows > 0) {
+            _mkChart('chart-rows-doughnut', {
+                type: 'doughnut',
+                data: {
+                    labels: tableNames,
+                    datasets: [{
+                        data: rowCounts,
+                        backgroundColor: colors.map(c => c + 'cc'),
+                        borderColor: colors, borderWidth: 2, hoverOffset: 10
+                    }]
+                },
+                options: {
+                    ..._baseOpts({ cutout: '65%' }),
+                    plugins: {
+                        legend: { display: true, position: 'bottom', labels: { color: '#9ca3af', padding: 10, boxWidth: 12 } },
+                        tooltip: {
+                            callbacks: {
+                                label: ctx => {
+                                    const pct = ((ctx.parsed / totalRows) * 100).toFixed(1);
+                                    return ` ${ctx.label}: ${ctx.parsed.toLocaleString()} (${pct}%)`;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // ③ Polar Area — Schema Complexity (unique / cool chart) ───────────
+        if (tableNames.length > 0) {
+            _mkChart('chart-columns-bar', {
+                type: 'polarArea',
+                data: {
+                    labels: tableNames,
+                    datasets: [{
+                        data: colCounts,
+                        backgroundColor: colors.map(c => c + 'aa'),
+                        borderColor: colors, borderWidth: 2,
+                    }]
+                },
+                options: {
+                    ..._baseOpts(),
+                    plugins: {
+                        legend: { display: true, position: 'bottom', labels: { color: '#9ca3af', boxWidth: 12, padding: 8 } },
+                        tooltip: { callbacks: { label: ctx => ` ${ctx.label}: ${ctx.parsed.r} columns` } }
+                    },
+                    scales: {
+                        r: {
+                            ticks: { display: false },
+                            grid: { color: 'rgba(128,128,128,0.15)' },
+                            pointLabels: { display: false },
+                        }
+                    }
+                }
+            });
+        }
+
+        // ④ Doughnut — PK Coverage ──────────────────────────────────────────
+        const hasPk = tableNames.filter(t => schemaDetails[t].has_pk).length;
+        const noPk = tableNames.length - hasPk;
+        _mkChart('chart-pk-coverage', {
+            type: 'doughnut',
+            data: {
+                labels: ['Has PK', 'No PK'],
+                datasets: [{
+                    data: [hasPk, noPk],
+                    backgroundColor: ['#10b981cc', '#ef4444cc'],
+                    borderColor: ['#10b981', '#ef4444'], borderWidth: 2, hoverOffset: 8
+                }]
+            },
+            options: {
+                ..._baseOpts({ cutout: '60%' }),
+                plugins: {
+                    legend: { display: true, position: 'bottom', labels: { color: '#9ca3af', boxWidth: 12, padding: 10 } },
+                    tooltip: { callbacks: { label: ctx => ` ${ctx.label}: ${ctx.parsed} tables` } }
+                }
+            }
+        });
+
+        // ── Schema detail table ──────────────────────────────────────────────
+        const schemaContainer = document.getElementById("db-schema-chart-container");
+        if (schemaContainer) {
+            const totalR = rowCounts.reduce((a, b) => a + b, 0);
+            let html = `<table class="schema-detail-table"><thead><tr>
+                <th>Table</th><th>Rows</th><th>Share</th><th>Columns</th><th>PK</th>
+            </tr></thead><tbody>`;
+            tableNames.forEach((name, i) => {
+                const info = schemaDetails[name];
+                const pct = totalR > 0 ? ((info.row_count / totalR) * 100).toFixed(1) : '0.0';
+                const col = colors[i];
+                const pkBadge = info.has_pk
+                    ? `<span style="color:#10b981;font-size:0.75rem">✓ PK</span>`
+                    : `<span style="color:#f59e0b;font-size:0.75rem">⚠ None</span>`;
+                const bar = `<div style="height:6px;width:100%;background:var(--border-color);border-radius:3px;overflow:hidden">
+                              <div style="height:100%;width:${pct}%;background:${col};border-radius:3px"></div></div>`;
+                html += `<tr>
+                    <td><strong>${name}</strong></td>
+                    <td style="font-variant-numeric:tabular-nums">${info.row_count.toLocaleString()}</td>
+                    <td style="min-width:80px">${bar}<span style="font-size:0.72rem;opacity:0.6">${pct}%</span></td>
+                    <td>${info.col_count}</td>
+                    <td>${pkBadge}</td>
+                </tr>`;
+            });
+            html += "</tbody></table>";
+            schemaContainer.innerHTML = html;
+        }
+
+    } catch (e) {
+        console.error("DB telemetry error:", e);
+    }
+}
+
+
+// ── Agent Telemetry ───────────────────────────────────────────────────────────
+async function _loadAgentTelemetry(connectionId) {
+    try {
+        const res = await fetch(`${API_BASE}/dashboard/${connectionId}/agent-telemetry`, {
+            headers: { "Authorization": `Bearer ${token}` }
+        });
+        if (!res.ok) return;
+        const d = await res.json();
+        if (!d.success) return;
+
+        const m = d.metrics;
+
+        // KPIs (core + new)
+        _setKpi('kpi-latency', m.avg_latency);
+        _setKpi('kpi-peak-latency', m.peak_latency ?? '--');
+        _setKpi('kpi-total-queries', m.total_queries);
+        _setKpi('kpi-success-rate', m.success_rate);
+        _setKpi('kpi-tokens', `<span style="font-size:0.9rem">${m.token_display ?? '--'}</span>`);
+        _setKpi('kpi-cost', m.est_cost_usd ?? '--');
+        _setKpi('kpi-avg-tokens', m.avg_tokens_per_query ?? '--');
+
+        // LangSmith status badge
+        const ls = m.langsmith || {};
+        const lsStatusEl = document.querySelector('#kpi-langsmith-status .kpi-value') ||
+            document.getElementById('kpi-langsmith-status');
+        if (lsStatusEl) {
+            lsStatusEl.textContent = ls.configured ? (ls.total_tokens != null ? '● Live' : '⚠ Error') : '○ Off';
+            lsStatusEl.style.color = ls.configured && ls.total_tokens != null ? '#22c55e'
+                : ls.configured ? '#f59e0b' : '#9ca3af';
+        }
+
+        // Intent colors also use stable hash
+        _mkChart('chart-success-fail', {
+            type: 'doughnut',
+            data: {
+                labels: ['Success', 'Failed'],
+                datasets: [{
+                    data: [m.successful ?? 0, m.failed ?? 0],
+                    backgroundColor: [SUCCESS_COLORS.ok, SUCCESS_COLORS.fail],
+                    borderColor: ['#10b981', '#ef4444'], borderWidth: 2, hoverOffset: 8
+                }]
+            },
+            options: {
+                ..._baseOpts({ cutout: '60%' }),
+                plugins: {
+                    legend: { display: true, position: 'bottom', labels: { color: '#9ca3af', boxWidth: 12, padding: 10 } },
+                    tooltip: { callbacks: { label: ctx => ` ${ctx.label}: ${ctx.parsed}` } }
+                }
+            }
+        });
+
+        // ⑥  Pie — intent distribution (stable colors by intent name)
+        const intents = d.intent_distribution || {};
+        const intentNames = Object.keys(intents);
+        const intentValues = Object.values(intents);
+        const intentColors = intentNames.map(n => tableColor(n));  // stable per intent name
+        if (intentNames.length > 0) {
+            _mkChart('chart-intent-pie', {
+                type: 'pie',
+                data: {
+                    labels: intentNames,
+                    datasets: [{
+                        data: intentValues,
+                        backgroundColor: intentColors.map(c => c + 'bb'),
+                        borderColor: intentColors, borderWidth: 2, hoverOffset: 8
+                    }]
+                },
+                options: {
+                    ..._baseOpts(),
+                    plugins: {
+                        legend: { display: true, position: 'bottom', labels: { color: '#9ca3af', boxWidth: 12, padding: 8 } },
+                        tooltip: { callbacks: { label: ctx => ` ${ctx.label}: ${ctx.parsed} queries` } }
+                    }
+                }
+            });
+        }
+
+        // ⑥ Line — latency trend
+        const trend = d.latency_trend || [];
+        if (trend.length > 0) {
+            _mkChart('chart-latency-trend', {
+                type: 'line',
+                data: {
+                    labels: trend.map(t => t.label),
+                    datasets: [{
+                        label: 'Latency (s)',
+                        data: trend.map(t => t.latency),
+                        borderColor: '#3b82f6',
+                        backgroundColor: 'rgba(59,130,246,0.1)',
+                        borderWidth: 2.5,
+                        pointBackgroundColor: '#3b82f6',
+                        pointRadius: 5,
+                        pointHoverRadius: 7,
+                        tension: 0.4,
+                        fill: true,
+                    }]
+                },
+                options: {
+                    ..._baseOpts(),
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                title: (items) => {
+                                    const t = trend[items[0].dataIndex];
+                                    return t ? new Date(t.timestamp).toLocaleTimeString() : '';
+                                },
+                                label: ctx => ` ${ctx.parsed.y}s`
+                            }
+                        }
+                    },
+                    scales: {
+                        y: { ..._gridOpts('y'), title: { display: true, text: 'seconds', color: '#9ca3af', font: { size: 11 } } },
+                        x: _gridOpts('x')
+                    }
+                }
+            });
+        }
+
+        renderQueryHistory(d.history);
+
+    } catch (e) {
+        console.error("Agent telemetry error:", e);
+    }
+}
+
+// ── Auto-refresh (ONLY while dashboard tab is visible) ───────────────────────
+function startDashboardAutoRefresh(connectionId) {
+    if (_dashboardRefreshTimer) clearInterval(_dashboardRefreshTimer);
+    _dashboardRefreshTimer = setInterval(() => {
+        if (currentConnectionId) loadDashboardData(currentConnectionId);
+    }, 30000);
+}
+
+// ── Query history table ───────────────────────────────────────────────────────
+function renderQueryHistory(historyList) {
+    const tbody = document.querySelector("#query-history-table tbody");
+    if (!tbody) return;
+    tbody.innerHTML = "";
+
+    if (!historyList || historyList.length === 0) {
+        tbody.innerHTML = "<tr><td colspan='5' style='text-align:center;padding:24px;opacity:0.45'>No queries recorded yet</td></tr>";
+        return;
+    }
+
+    historyList.forEach(q => {
+        const tr = document.createElement("tr");
+        const isOk = q.status === "Success";
+        const badge = isOk
+            ? `<span class="status-badge status-ok">✓ Success</span>`
+            : `<span class="status-badge status-fail">✗ Failed</span>`;
+        const shortPrompt = q.prompt.length > 60 ? q.prompt.substring(0, 60) + '…' : q.prompt;
+        tr.innerHTML = `
+            <td style="white-space:nowrap">${formatDate(q.timestamp)}</td>
+            <td title="${q.prompt.replace(/"/g, '&quot;')}">${shortPrompt}</td>
+            <td><code style="font-size:0.78rem;opacity:0.8">${q.intent}</code></td>
+            <td>${q.latency}s</td>
+            <td>${badge}</td>
+        `;
+        tbody.appendChild(tr);
+    });
 }
