@@ -31,9 +31,10 @@ class Settings(BaseSettings):
     GROQ_FAST_MODEL: str = "llama-3.1-8b-instant"  # Faster model for simple queries
     
     # LangSmith Observability
-    LANGCHAIN_TRACING_V2: str = "false"
-    LANGCHAIN_API_KEY: str = ""
-    LANGCHAIN_PROJECT: str = "sql-agent"
+    LANGSMITH_TRACING: str = "false"
+    LANGSMITH_ENDPOINT: str = "https://api.smith.langchain.com"
+    LANGSMITH_API_KEY: str = ""
+    LANGSMITH_PROJECT: str = "sql_agent"
     
     # Application Settings
     APP_NAME: str = "AI SQL Agent"
