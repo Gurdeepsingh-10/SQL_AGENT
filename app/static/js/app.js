@@ -1139,6 +1139,12 @@ function startDashboardAutoRefresh(connectionId) {
 }
 
 // ── Query history table ───────────────────────────────────────────────────────
+function formatDate(isoStr) {
+    if (!isoStr) return "--";
+    const d = new Date(isoStr);
+    return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
 function renderQueryHistory(historyList) {
     const tbody = document.querySelector("#query-history-table tbody");
     if (!tbody) return;
