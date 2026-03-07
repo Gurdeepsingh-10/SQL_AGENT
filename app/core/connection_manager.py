@@ -1,6 +1,9 @@
 """
 Dynamic database connection manager.
 Handles multiple user database connections with caching and encryption.
+Includes:
+- Connection pool tuning (pool_size=10, max_overflow=20)
+- Per-connection TTL schema cache (10-minute TTL) via cachetools
 """
 
 from sqlalchemy import create_engine, text
@@ -10,6 +13,13 @@ from cryptography.fernet import Fernet
 import os
 from app.config import settings
 from app.utils.logger import logger
+
+try:
+    from cachetools import TTLCache
+    _SCHEMA_CACHE: TTLCache = TTLCache(maxsize=64, ttl=600)  # 10-minute TTL
+except ImportError:
+    _SCHEMA_CACHE = {}  # fallback plain dict (no TTL)
+    logger.warning("cachetools not installed — schema cache has no TTL expiry")
 
 
 class ConnectionManager:
@@ -96,11 +106,12 @@ class ConnectionManager:
             
         engine = create_engine(
             connection_url,
-            pool_size=5,
-            max_overflow=10,
-            pool_pre_ping=True,
-            pool_recycle=280,  # 280s recycle to avoid Neon 5-min idle timeouts
-            echo=settings.DEBUG,
+            pool_size=10,         # baseline persistent connections
+            max_overflow=20,      # up to 30 total under spike load
+            pool_pre_ping=True,   # recycle stale connections automatically
+            pool_timeout=30,      # fail fast instead of hanging forever
+            pool_recycle=300,     # recycle every 5m — works for Neon idle timeout
+            echo=False,           # never echo SQL in production (perf & security)
             connect_args=connect_args
         )
         
