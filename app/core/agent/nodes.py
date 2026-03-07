@@ -25,6 +25,7 @@ from app.core.agent.executor import SQLExecutor
 from app.core.agent.schema_inspector import SchemaInspector, _get_dialect
 from app.core.agent.memory_manager import memory_manager
 from app.core.agent.context_pruner import context_pruner
+from app.core.sql_guard import classify_sql_risk, inject_row_limit
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -46,7 +47,7 @@ sql_gen = SQLGenerator()
 # Constants
 # ---------------------------------------------------------------------------
 
-MAX_RE_REASONING_ATTEMPTS = 2  # Max SQL re-generation attempts on schema errors
+MAX_RE_REASONING_ATTEMPTS = 3  # Hard circuit-breaker: stop looping after 3 bad SQL attempts
 
 # ---------------------------------------------------------------------------
 # Per-engine SchemaInspector + SQLValidator cache
@@ -424,6 +425,33 @@ def execute_sql(state: AgentState) -> Dict[str, Any]:
     engine = current_engine_cv.get()
     if not engine:
         return {"error": "Database engine not available in context"}
+
+    # ── Two-step confirmation gate ───────────────────────────────────────
+    confirmed = state.get("confirmed", False)
+    risk, risk_msg = classify_sql_risk(sql_query)
+
+    if risk == "BLOCKED":
+        return {"error": risk_msg, "messages": [AIMessage(content=risk_msg)]}
+
+    if risk in ("CONFIRM", "DANGER") and not confirmed:
+        # Pause and ask user to confirm before touching the DB
+        logger.info(f"[execute_sql] Pausing for user confirmation ({risk}): {sql_query[:80]}")
+        return {
+            "sql_requires_confirmation": True,
+            "sql_query": sql_query,
+            "messages": [
+                AIMessage(
+                    content=(
+                        f"{risk_msg}\n\n"
+                        f"```sql\n{sql_query}\n```\n\n"
+                        "Reply **confirm** to execute, or ask something else to cancel."
+                    )
+                )
+            ],
+        }
+
+    # ── Row-cap injection (prevents SELECT * blowups) ─────────────────────────
+    sql_query = inject_row_limit(sql_query)
 
     # Reuse executor (stateless — safe to cache per engine)
     executor = SQLExecutor(engine)
