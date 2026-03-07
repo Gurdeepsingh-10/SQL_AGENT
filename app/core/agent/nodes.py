@@ -308,6 +308,7 @@ def generate_sql(state: AgentState) -> Dict[str, Any]:
 
     return {
         "sql_query": sql_query,
+        "chart_config": result.get("chart_config"),
         "dialect": dialect,
         "requires_re_reasoning": False,
         "schema_errors": {},
