@@ -32,6 +32,7 @@ class AgentState(TypedDict):
 
     # SQL generation
     sql_query: Optional[str]
+    chart_config: Optional[Dict[str, Any]] # Chart.js config from LLM
     dialect: str                           # postgresql / mysql / sqlite / mssql / oracle
 
     # Validation
@@ -42,6 +43,7 @@ class AgentState(TypedDict):
     # Execution
     sql_results: Optional[List[Dict[str, Any]]]
     sql_requires_confirmation: bool
+    confirmed: bool                            # Set True by frontend after user approves modal
     execution_error_type: Optional[str]    # transient / schema / permission / permanent
 
     # Error handling
