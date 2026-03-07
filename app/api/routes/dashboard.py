@@ -17,7 +17,7 @@ from app.models.user import User
 from app.models.user_connection import UserConnection
 from app.models.query_history import QueryHistory
 from app.core.connection_manager import connection_manager
-from app.core.agent.schema_inspector import SchemaInspector
+from app.core.agent.nodes import _get_cached_inspector  # reuses per-engine TTL cache
 from app.config import settings
 from app.utils.logger import get_logger
 
@@ -27,9 +27,9 @@ router = APIRouter()
 
 def _get_langsmith_token_stats() -> Dict[str, Any]:
     """Pull real token usage stats from LangSmith SDK if configured."""
-    tracing_enabled = settings.LANGCHAIN_TRACING_V2.lower() == "true"
-    api_key = settings.LANGCHAIN_API_KEY
-    project = settings.LANGCHAIN_PROJECT
+    tracing_enabled = settings.LANGSMITH_TRACING.lower() == "true"
+    api_key = settings.LANGSMITH_API_KEY
+    project = settings.LANGSMITH_PROJECT
 
     if not tracing_enabled or not api_key:
         return {"configured": False, "total_tokens": None, "total_cost_usd": None}
@@ -94,7 +94,7 @@ async def get_db_telemetry(
         decrypted_url = connection_manager.decrypt_connection_url(connection.connection_url)
         engine = connection_manager.get_engine(connection.id, decrypted_url)
 
-        inspector = SchemaInspector(engine)
+        inspector = _get_cached_inspector(engine)
         full_schema = inspector.get_full_schema()
 
         total_tables = full_schema.get("total_tables", 0)
@@ -115,16 +115,39 @@ async def get_db_telemetry(
             except Exception as e:
                 logger.warning(f"Could not fetch DB size: {e}")
 
-        # Per-table schema details (row count + column count)
+        # Per-table schema details (row count + column count + pk info)
         schema_details = {}
         column_counts = {}
+        tables_no_pk = 0
         for name, info in tables_dict.items():
-            col_count = len(info.get("columns", []))
+            cols = info.get("columns", [])
+            col_count = len(cols)
+            has_pk = any(c.get("primary_key") for c in cols)
+            if not has_pk:
+                tables_no_pk += 1
             schema_details[name] = {
                 "row_count": info.get("row_count", 0),
                 "col_count": col_count,
+                "has_pk": has_pk,
             }
             column_counts[name] = col_count
+
+        # Active pool connections via SQLAlchemy pool status
+        pool = engine.pool
+        try:
+            pool_size = pool.size()  # configured pool_size
+            checked_out = pool.checkedout()  # currently in use
+        except Exception:
+            pool_size = 0
+            checked_out = 0
+
+        # DB dialect + version
+        try:
+            with engine.connect() as conn:
+                ver = conn.execute(text("SELECT version()")).scalar()
+                dialect_version = str(ver)[:60] if ver else engine.dialect.name
+        except Exception:
+            dialect_version = engine.dialect.name
 
         return {
             "success": True,
@@ -134,9 +157,14 @@ async def get_db_telemetry(
                 "total_columns": total_columns,
                 "db_size": db_size_str,
                 "status": "Healthy",
+                # New metrics
+                "tables_no_pk": tables_no_pk,
+                "active_connections": checked_out,
+                "pool_size": pool_size,
+                "dialect_version": dialect_version,
             },
             "schema_details": schema_details,
-            "column_counts": column_counts,   # {table: col_count} for bar chart
+            "column_counts": column_counts,
         }
 
     except Exception as e:
@@ -173,16 +201,20 @@ async def get_agent_telemetry(
 
     total_queries = len(recent_queries)
 
+    # Fetch LangSmith data up front — needed for cost metrics below
+    langsmith_stats = _get_langsmith_token_stats()
+
     if total_queries == 0:
         return {
             "success": True,
             "metrics": {
-                "avg_latency": "0.0s",
+                "avg_latency": "0.0s", "peak_latency": "0.0s",
                 "total_queries": 0,
                 "success_rate": "0%",
-                "successful": 0,
-                "failed": 0,
-                "langsmith": _get_langsmith_token_stats(),
+                "successful": 0, "failed": 0,
+                "langsmith": langsmith_stats,
+                "est_cost_usd": "$0.0000",
+                "avg_tokens_per_query": 0,
             },
             "history": [],
             "intent_distribution": {},
@@ -196,6 +228,12 @@ async def get_agent_telemetry(
 
     valid_latencies = [q.execution_time for q in recent_queries if q.execution_time is not None]
     avg_latency = sum(valid_latencies) / len(valid_latencies) if valid_latencies else 0.0
+    peak_latency = max(valid_latencies) if valid_latencies else 0.0
+    avg_tokens_per_query = round(langsmith_stats.get("total_tokens", 0) / total_queries, 1) if total_queries else 0
+
+    # Estimated cost (Llama-3 70B on Groq: ~$0.0009 / 1k tokens)
+    total_tokens = langsmith_stats.get("total_tokens") or 0
+    est_cost_usd = round((total_tokens / 1000) * 0.0009, 4)
 
     # ── Intent Distribution ───────────────────────────────────────────────────
     intent_counts: Dict[str, int] = defaultdict(int)
@@ -226,10 +264,7 @@ async def get_agent_telemetry(
         for q in recent_queries[:15]
     ]
 
-    # ── LangSmith live token data ─────────────────────────────────────────────
-    langsmith_stats = _get_langsmith_token_stats()
-
-    # Build token display string
+    # ── LangSmith token display ─────────────────────────────────────────
     if langsmith_stats.get("configured") and langsmith_stats.get("total_tokens") is not None:
         t = langsmith_stats["total_tokens"]
         token_display = f"{t:,} tokens"
@@ -242,12 +277,15 @@ async def get_agent_telemetry(
         "success": True,
         "metrics": {
             "avg_latency": f"{avg_latency:.2f}s",
+            "peak_latency": f"{peak_latency:.2f}s",
             "total_queries": total_queries,
             "success_rate": f"{success_rate}%",
             "successful": successful,
             "failed": failed,
             "langsmith": langsmith_stats,
             "token_display": token_display,
+            "est_cost_usd": f"${est_cost_usd:.4f}",
+            "avg_tokens_per_query": avg_tokens_per_query,
         },
         "history": history_payload,
         "intent_distribution": dict(intent_counts),
