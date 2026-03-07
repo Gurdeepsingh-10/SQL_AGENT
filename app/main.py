@@ -2,15 +2,26 @@
 Main FastAPI application entry point.
 """
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import init_db
 from app.core.middleware import log_requests_middleware, error_handler_middleware, setup_cors
-from app.api.routes import auth, agent, database, connections
+from app.api.routes import auth, agent, database, connections, dashboard
 from app.utils.logger import get_logger
+
+# ── Rate Limiting ─────────────────────────────────────────────────────────
+try:
+    from slowapi import Limiter, _rate_limit_exceeded_handler
+    from slowapi.util import get_remote_address
+    from slowapi.errors import RateLimitExceeded
+    limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
+    _RATE_LIMIT_AVAILABLE = True
+except ImportError:
+    limiter = None
+    _RATE_LIMIT_AVAILABLE = False
 
 logger = get_logger(__name__)
 
@@ -22,6 +33,11 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc"
 )
+
+# Attach rate limiter state and error handler
+if _RATE_LIMIT_AVAILABLE:
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Setup CORS
 setup_cors(app)
@@ -35,6 +51,7 @@ app.include_router(auth.router)
 app.include_router(agent.router)
 app.include_router(database.router)
 app.include_router(connections.router)  # Already has /connections prefix
+app.include_router(dashboard.router, prefix="/dashboard", tags=["Dashboard"])
 
 # Mount static files
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
