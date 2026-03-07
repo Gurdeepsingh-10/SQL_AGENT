@@ -56,7 +56,7 @@ DIALECT_RULES: Dict[str, str] = {
 - Boolean literals: TRUE/FALSE or 1/0
 - String concatenation: CONCAT() function
 - Use LIMIT/OFFSET for pagination
-- Backtick-quote reserved word identifiers: \`order\`, \`group\`
+- Backtick-quote reserved word identifiers: `order`, `group`
 - Use IFNULL() or COALESCE() for NULL handling
 - Date arithmetic: DATE_ADD(date, INTERVAL 7 DAY)""",
 
@@ -147,7 +147,7 @@ def _call_groq_with_retry(
     return None
 
 
-def _clean_sql(sql: str, intent: str = "", dialect: str = "") -> str:
+def _clean_sql(sql: str, intent: str = "", dialect: str = "") -> Optional[str]:
     """Strip markdown fences, normalize whitespace, and post-process for safety."""
     sql = re.sub(r"```sql\s*", "", sql, flags=re.IGNORECASE)
     sql = re.sub(r"```\s*", "", sql)
@@ -172,16 +172,6 @@ def _clean_sql(sql: str, intent: str = "", dialect: str = "") -> str:
     sql = "\n".join(lines[start_idx:]).strip()
     # Ensure single trailing semicolon
     sql = sql.rstrip(";").strip()
-
-    # ── PostgreSQL INSERT safety: inject ON CONFLICT DO NOTHING ──────────────
-    # This deterministically prevents UniqueViolation for batch inserts.
-    # Applied when: dialect is postgresql, it's an INSERT, and no conflict clause exists.
-    if (
-        dialect.lower() == "postgresql"
-        and sql.upper().lstrip().startswith("INSERT")
-        and "ON CONFLICT" not in sql.upper()
-    ):
-        sql = sql + "\nON CONFLICT DO NOTHING"
 
     return sql + ";"
 
@@ -256,9 +246,20 @@ class SQLGenerator:
                 sql_query = parsed.get("sql")
                 chart_config = parsed.get("chart_config")
             except json.JSONDecodeError:
-                # Fallback if the LLM ignored instructions and returned raw SQL
+                # Fallback if the LLM ignored instructions and returned raw SQL or broken JSON
                 logger.warning("[SQLGenerator] Failed to parse JSON, falling back to raw sql cleanup")
-                sql_query = candidate
+                # Try to extract the SQL part using regex to bypass JSON errors
+                sql_match = re.search(r'(?i)(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|WITH|TRUNCATE|EXPLAIN)\b.*', candidate, re.DOTALL)
+                if sql_match:
+                    extracted = sql_match.group(0)
+                    # Clean up trailing JSON artifacts like `", "chart_config": null }`
+                    extracted = re.sub(r'",\s*"chart_config".*', '', extracted, flags=re.DOTALL)
+                    extracted = re.sub(r'\}\s*$', '', extracted)
+                    sql_query = extracted.strip().strip('"').strip()
+                    # Also replace literal "\n" strings if the model partially escaped it
+                    sql_query = sql_query.replace('\\n', '\n')
+                else:
+                    sql_query = candidate
         
         if not sql_query:
             return {
@@ -270,6 +271,15 @@ class SQLGenerator:
             }
 
         final_sql = _clean_sql(sql_query, intent=intent, dialect=dialect)
+        
+        if not final_sql:
+            return {
+                "sql": None, "intent": intent, "confidence": 0.0,
+                "reasoning": reasoning, "dialect": dialect, "passes": 1,
+                "requires_parameters": False,
+                "chart_config": chart_config,
+                "error": "Failed to clean SQL candidate",
+            }
 
         logger.info(
             f"[SQLGenerator] Generated SQL (dialect={dialect}): "
@@ -334,7 +344,7 @@ class SQLGenerator:
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.05,
-            max_tokens=400,  # SQL is rarely > 200 tokens; 400 gives ample headroom
+            max_tokens=1500,  # Increased from 400 to support batch INSERTs with many rows
         )
         return raw
 
