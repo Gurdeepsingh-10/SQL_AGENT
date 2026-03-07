@@ -162,6 +162,7 @@ async def process_query(
             "sql_query": None,
             "sql_results": None,
             "sql_requires_confirmation": False,
+            "confirmed": request.confirmed,  # User-approved DDL/DML execution
 
             # Reset validation fields
             "schema_errors": {},
@@ -230,6 +231,22 @@ async def process_query(
         if result_state.get("messages"):
             last_msg = result_state["messages"][-1]
             final_message = last_msg.content if hasattr(last_msg, "content") else str(last_msg)
+
+        sql_requires_confirmation = result_state.get("sql_requires_confirmation", False)
+
+        if sql_requires_confirmation:
+            # Agent paused — return confirmation request to frontend
+            from app.core.sql_guard import classify_sql_risk
+            _, risk_msg = classify_sql_risk(sql_query or "")
+            return AgentQueryResponse(
+                success=True,
+                intent=intent,
+                generated_sql=sql_query,
+                requires_confirmation=True,
+                pending_sql=sql_query,
+                message=final_message,
+                execution_time=execution_time
+            )
 
         if error and error != "AMBIGUOUS_REQUEST":
             return AgentQueryResponse(
