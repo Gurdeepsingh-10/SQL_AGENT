@@ -25,12 +25,17 @@ class AgentQueryRequest(BaseModel):
         None,
         description="Target database connection ID (uses default if not provided)"
     )
+    confirmed: bool = Field(
+        False,
+        description="Set to True when the user has approved a DDL/DML confirmation modal"
+    )
 
     class Config:
         json_schema_extra = {
             "example": {
                 "query": "Show me all users created in the last 7 days",
-                "connection_id": 1
+                "connection_id": 1,
+                "confirmed": False,
             }
         }
 
@@ -98,6 +103,7 @@ class AgentQueryResponse(BaseModel):
     # Results (SELECT queries)
     results: Optional[List[Dict[str, Any]]] = None
     columns: Optional[List[str]] = None
+    chart_config: Optional[Dict[str, Any]] = None
 
     # Rich metadata
     metadata: Optional[QueryMetadata] = None
@@ -108,6 +114,11 @@ class AgentQueryResponse(BaseModel):
     # Legacy fields (kept for backward compatibility)
     result_count: Optional[int] = None
     execution_time: Optional[float] = None
+
+    # Confirmation flow — set when DDL/DML needs user approval
+    requires_confirmation: bool = False
+    pending_sql: Optional[str] = None
+    confirmation_risk: Optional[str] = None  # "CONFIRM" or "DANGER"
 
     # Response message
     message: str
