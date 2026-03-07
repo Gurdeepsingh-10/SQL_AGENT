@@ -581,34 +581,11 @@ class SchemaInspector:
             return 0
 
     def _batch_get_row_counts(self, table_names: List[str]) -> Dict[str, int]:
-        """Fetch row counts for multiple tables in one go (dialect-optimized)."""
+        """Fetch row counts for multiple tables. 
+        We use sequential COUNT(*) via the ThreadPoolExecutor because pg_class.reltuples 
+        is wildly inaccurate for new/small tables before VACUUM runs, causing 0 row bugs.
+        """
         counts = {t: None for t in table_names}
-        if not table_names:
-            return counts
-
-        if self.dialect == "postgresql":
-            try:
-                # Optimized estimated count for Postgres (from pg_class)
-                # This is near-instant compared to sequential COUNT(*)
-                with self.engine.connect() as conn:
-                    query = text("""
-                        SELECT relname, reltuples::bigint AS count
-                        FROM pg_class C
-                        JOIN pg_namespace N ON (N.oid = C.relnamespace)
-                        WHERE relname = ANY(:names)
-                        AND nspname NOT IN ('pg_catalog', 'information_schema')
-                        AND relkind = 'r'
-                    """)
-                    result = conn.execute(query, {"names": table_names})
-                    for row in result:
-                        counts[row[0]] = max(0, row[1])
-                logger.debug(f"[SchemaInspector] Batched row counts (Postgres) for {len(table_names)} tables")
-                return counts
-            except Exception as e:
-                logger.warning(f"[SchemaInspector] Postgres batch row count failed: {e}")
-
-        # SQLite/Other dialects: Sequential count is usually unavoidable
-        # but we only do it if explicitly needed. For and LLC context, 0 is often ok fallback.
         return counts
 
     @staticmethod
