@@ -639,10 +639,96 @@
             <aside class="sidebar">
                 <div class="card">
                     <h2>connections</h2>
-                    <div id="connection-list">
-                        <div class="connection-item">loading...</div>
-                    </div>
+                    <!-- Connection list — populated by renderConnections() -->
+                    <div id="connection-list"></div>
                     <button id="add-connection-btn" style="width: 100%; margin-top: 20px;">+ add new</button>
+
+                    <!-- Live status strip -->
+                    <div id="current-connection-status"
+                        style="margin-top: 12px; font-size: 0.82em; display: flex; align-items: center; gap: 6px;">
+                        <span id="status-indicator" style="color: #9ca3af;">●</span>
+                        <span id="status-text" style="opacity: 0.7;">no connection selected</span>
+                    </div>
+
+                    <style>
+                        /* ── Connection sidebar — retro terminal theme ── */
+                        #connection-list .connection-item {
+                            background: transparent;
+                            border: 1px solid var(--border-color, #2a2a2a);
+                            border-radius: 0;
+                            margin-bottom: 6px;
+                            padding: 10px 14px;
+                            display: flex;
+                            align-items: center;
+                            justify-content: space-between;
+                            cursor: pointer;
+                            transition: border-color .15s, background .15s, color .15s;
+                            font-family: 'Space Mono', monospace;
+                            position: relative;
+                        }
+
+                        #connection-list .connection-item::before {
+                            content: '>';
+                            position: absolute;
+                            left: 6px;
+                            opacity: 0;
+                            color: var(--accent-color, #22c55e);
+                            font-size: 0.75em;
+                            transition: opacity .15s;
+                        }
+
+                        #connection-list .connection-item:hover {
+                            border-color: var(--accent-color, #22c55e);
+                            background: rgba(34, 197, 94, 0.05);
+                        }
+
+                        #connection-list .connection-item:hover::before {
+                            opacity: 1;
+                        }
+
+                        #connection-list .connection-item.active {
+                            border-color: var(--accent-color, #22c55e);
+                            background: rgba(34, 197, 94, 0.08);
+                            padding-left: 22px;
+                        }
+
+                        #connection-list .connection-item.active::before {
+                            opacity: 1;
+                        }
+
+                        #connection-list .connection-info {
+                            flex: 1;
+                            min-width: 0;
+                        }
+
+                        #connection-list .connection-name {
+                            font-size: 0.88em;
+                            font-weight: 700;
+                            color: #f1f5f9;
+                            white-space: nowrap;
+                            overflow: hidden;
+                            text-overflow: ellipsis;
+                            display: block;
+                        }
+
+                        #connection-list .delete-btn {
+                            background: transparent;
+                            border: none;
+                            color: #666;
+                            font-size: 1rem;
+                            cursor: pointer;
+                            padding: 0 3px;
+                            line-height: 1;
+                            border-radius: 3px;
+                            transition: color .15s;
+                            flex-shrink: 0;
+                            margin-left: 8px;
+                        }
+
+                        #connection-list .delete-btn:hover {
+                            color: #ef4444;
+                        }
+                    </style>
                 </div>
             </aside>
 
