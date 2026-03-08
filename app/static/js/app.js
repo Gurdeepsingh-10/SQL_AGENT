@@ -355,10 +355,29 @@ function showDashboard() {
 // Connections
 // ============================================================
 async function fetchConnections() {
+    // Show an animated status in the list while waiting
+    if (connectionList) {
+        connectionList.innerHTML = `<div class='connection-item' style='opacity:0.6;font-size:0.85em;'>
+            <span class='blink'>⬤</span>&nbsp;connecting to database…
+        </div>`;
+    }
+
+    // Set a slow-start warning after 5 s (Neon cold-start can take up to 15 s)
+    const slowTimer = setTimeout(() => {
+        if (connectionList && connectionList.querySelector('.blink')) {
+            connectionList.innerHTML = `<div class='connection-item' style='opacity:0.6;font-size:0.82em;'>
+                ⏳ Database waking up (Neon cold-start)…<br>
+                <span style='opacity:0.5'>This can take up to 15 seconds on the free tier.</span>
+            </div>`;
+        }
+    }, 5000);
+
     try {
         const response = await fetch(`${API_BASE}/connections/list`, {
             headers: { "Authorization": `Bearer ${token}` }
         });
+
+        clearTimeout(slowTimer);
 
         if (response.status === 401) {
             token = null;
@@ -370,53 +389,58 @@ async function fetchConnections() {
         const connections = await response.json();
         renderConnections(connections);
     } catch (err) {
+        clearTimeout(slowTimer);
         console.error("Failed to fetch connections", err);
+        if (connectionList) {
+            connectionList.innerHTML = `<div class='connection-item' style='font-size:0.82em;color:#ef4444;'>
+                ❌ Could not reach the database.<br>
+                <button onclick="fetchConnections()" style='margin-top:6px;padding:3px 10px;font-size:0.8rem;'>Retry</button>
+            </div>`;
+        }
     }
 }
 
 function renderConnections(connections) {
-    connectionList.innerHTML = "";
+    // connectionList = document.getElementById("connection-list") — fixed at top of file
+    if (!connectionList) return;
+    connectionList.innerHTML = '';
 
     const activeConnections = connections.filter(conn => conn.is_active);
 
     if (activeConnections.length === 0) {
         connectionList.innerHTML = "<div class='connection-item'>No connections</div>";
-        // Clear stale saved connection if it no longer exists
         localStorage.removeItem("sql_agent_connection_id");
         currentConnectionId = null;
         if (currentConnectionBadge) currentConnectionBadge.textContent = "NO CONNECTION";
         return;
     }
 
-    // Determine which connection to auto-select:
-    // Priority 1: the saved connection ID from localStorage (survives refresh)
-    // Priority 2: the connection marked as default
-    // Priority 3: the first active connection
+    // Priority: saved localStorage ID → default → first
     let connectionToSelect = null;
-
     if (currentConnectionId) {
-        // Verify the saved connection still exists and is active
         connectionToSelect = activeConnections.find(c => c.id === currentConnectionId) || null;
     }
     if (!connectionToSelect) {
         connectionToSelect = activeConnections.find(c => c.is_default) || activeConnections[0];
     }
 
+    const esc = str => String(str || '').replace(/[&<>'"]/g, t => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[t]));
+
     activeConnections.forEach(conn => {
-        const div = document.createElement("div");
-        div.className = "connection-item";
+        const div = document.createElement('div');
+        div.className = 'connection-item';
+        div.dataset.connId = conn.id;
+
         div.innerHTML = `
-            <div style="flex: 1; cursor: pointer;" class="conn-info">
-                <span>${conn.connection_name}</span>
+            <div class="connection-info">
+                <span class="connection-name">${esc(conn.connection_name)}</span>
             </div>
-            <button class="delete-btn" data-id="${conn.id}" title="Delete connection">×</button>
+            <button class="delete-btn" data-id="${conn.id}" title="delete connection">✕</button>
         `;
 
-        div.querySelector(".conn-info").addEventListener("click", () => {
-            selectConnection(conn);
-        });
+        div.querySelector('.connection-info').addEventListener('click', () => selectConnection(conn));
 
-        div.querySelector(".delete-btn").addEventListener("click", async (e) => {
+        div.querySelector('.delete-btn').addEventListener('click', async e => {
             e.stopPropagation();
             if (confirm(`Delete connection "${conn.connection_name}"?`)) {
                 await deleteConnection(conn.id);
@@ -426,16 +450,9 @@ function renderConnections(connections) {
         connectionList.appendChild(div);
     });
 
-    // Auto-select silently (no chat message) — this is a restore, not a user action
+    // Auto-restore silently on page load
     if (connectionToSelect) {
         selectConnection(connectionToSelect, true);
-        // Mark the active item in the list
-        Array.from(connectionList.children).forEach(child => {
-            const nameEl = child.querySelector && child.querySelector(".conn-info span");
-            if (nameEl && nameEl.textContent === connectionToSelect.connection_name) {
-                child.classList.add("active");
-            }
-        });
     }
 }
 
@@ -464,26 +481,32 @@ async function deleteConnection(connectionId) {
 }
 
 function selectConnection(conn, silent = false) {
+    if (!conn) return;
+
     currentConnectionId = conn.id;
-    // Persist the selected connection ID so it survives page refreshes
     localStorage.setItem("sql_agent_connection_id", conn.id);
 
+    // Update top badge
     if (currentConnectionBadge) {
         currentConnectionBadge.textContent = conn.connection_name;
     }
 
-    Array.from(connectionList.children).forEach(child => {
-        child.classList.remove("active");
-        if (child.querySelector && child.querySelector(".conn-info")) {
-            const nameEl = child.querySelector(".conn-info span");
-            if (nameEl && nameEl.textContent === conn.connection_name) {
-                child.classList.add("active");
+    // Highlight the active item in the list
+    if (connectionList) {
+        Array.from(connectionList.children).forEach(child => {
+            child.classList.remove('active');
+            if (String(child.dataset.connId) === String(conn.id)) {
+                child.classList.add('active');
             }
-        }
-    });
+        });
+    }
 
-    // Only show the "switched" message when the user explicitly clicks,
-    // not when auto-restoring on page load
+    // Update the status strip
+    const statusDot = document.getElementById('status-indicator');
+    const statusTxt = document.getElementById('status-text');
+    if (statusDot) statusDot.style.color = '#22c55e';
+    if (statusTxt) statusTxt.textContent = 'connected: ' + conn.connection_name;
+
     if (!silent) {
         addMessage("agent", `Switched to connection: ${conn.connection_name}`);
     }
