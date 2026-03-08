@@ -114,10 +114,15 @@ async def list_connections(
     current_user: User = Depends(get_current_user)
 ):
     """
-    List all database connections for the current user.
+    List ALL database connections for the current user (including offline ones).
+    Returns all saved connections regardless of current connectivity status.
     """
     connections = db.query(UserConnection).filter(
         UserConnection.user_id == current_user.id
+        # NOTE: Do NOT filter by is_active here — show all saved connections
+    ).order_by(
+        UserConnection.is_default.desc(),  # Default first
+        UserConnection.created_at.desc()
     ).all()
     
     result = []
