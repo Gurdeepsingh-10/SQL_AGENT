@@ -4,6 +4,7 @@ Handles multiple user database connections with caching and encryption.
 Includes:
 - Connection pool tuning (pool_size=10, max_overflow=20)
 - Per-connection TTL schema cache (10-minute TTL) via cachetools
+- SSL mode auto-configuration for Supabase and cloud databases
 """
 
 from sqlalchemy import create_engine, text
@@ -35,6 +36,20 @@ class ConnectionManager:
         
         # Cache for database engines (connection_id -> Engine)
         self._engine_cache: Dict[int, Engine] = {}
+    
+    def _sanitize_connection_url(self, url: str) -> str:
+        """
+        Sanitize connection URL for cloud databases.
+        - Ensure Supabase URLs have sslmode=require
+        - Add other cloud database SSL defaults
+        """
+        if "supabase.co" in url and "sslmode" not in url:
+            # Supabase requires SSL
+            separator = "&" if "?" in url else "?"
+            url = f"{url}{separator}sslmode=require"
+            logger.info("[ConnectionManager] Added sslmode=require for Supabase")
+        
+        return url
         
     def encrypt_connection_url(self, url: str) -> str:
         """Encrypt a database connection URL."""
@@ -52,6 +67,9 @@ class ConnectionManager:
             (success: bool, error_message: Optional[str])
         """
         try:
+            # Sanitize URL (add SSL for Supabase, etc.)
+            connection_url = self._sanitize_connection_url(connection_url)
+            
             # Add connection timeout for Postgres
             connect_args = {}
             if "postgresql" in connection_url:
@@ -97,6 +115,9 @@ class ConnectionManager:
         
         # Create new engine
         logger.info(f"Creating new engine for connection {connection_id}")
+        
+        # Sanitize URL (add SSL for Supabase, etc.)
+        connection_url = self._sanitize_connection_url(connection_url)
         
         # Add connection timeout for Postgres (especially needed for Neon scale-to-zero wakeups)
         connect_args = {}
