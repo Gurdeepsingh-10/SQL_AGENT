@@ -10,7 +10,6 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from typing import Dict, Optional
 from cryptography.fernet import Fernet
-import os
 from app.config import settings
 from app.utils.logger import logger
 
@@ -27,10 +26,8 @@ class ConnectionManager:
     
     def __init__(self):
         """Initialize connection manager with encryption."""
-        # Generate or load encryption key for connection strings
-        self.encryption_key = os.getenv("CONNECTION_ENCRYPTION_KEY", Fernet.generate_key())
-        if isinstance(self.encryption_key, str):
-            self.encryption_key = self.encryption_key.encode()
+        # Build encryption cipher from configured key
+        self.encryption_key = settings.CONNECTION_ENCRYPTION_KEY.encode()
         self.cipher = Fernet(self.encryption_key)
         
         # Cache for database engines (connection_id -> Engine)
