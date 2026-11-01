@@ -19,6 +19,8 @@ def test_secret_key_too_short_rejected():
     with pytest.raises(ValidationError) as exc_info:
         make_settings(SECRET_KEY="short-sentinel-value")
     assert "short-sentinel-value" not in str(exc_info.value)
+    # pydantic prints input_value when hide_input_in_errors is off, and long inputs are truncated, so check for the marker itself
+    assert "input_value" not in str(exc_info.value)
 
 
 def test_secret_key_placeholder_rejected():
@@ -46,6 +48,8 @@ def test_encryption_key_invalid_rejected(monkeypatch, valid_secret_key):
     with pytest.raises(ValidationError) as exc_info:
         make_settings(CONNECTION_ENCRYPTION_KEY="invalid-sentinel-key")
     assert "invalid-sentinel-key" not in str(exc_info.value)
+    # pydantic prints input_value when hide_input_in_errors is off, and long inputs are truncated, so check for the marker itself
+    assert "input_value" not in str(exc_info.value)
 
     monkeypatch.delenv("CONNECTION_ENCRYPTION_KEY", raising=False)
     with pytest.raises(ValidationError):
@@ -130,6 +134,8 @@ def test_database_url_errors_do_not_leak_password():
     with pytest.raises(ValidationError) as exc_info:
         make_settings(DATABASE_URL="postgresql://user:pw-sentinel-9x@db.example.com/d?sslmode=disable")
     assert "pw-sentinel-9x" not in str(exc_info.value)
+    # pydantic prints input_value when hide_input_in_errors is off, and long inputs are truncated, so check for the marker itself
+    assert "input_value" not in str(exc_info.value)
 
 
 

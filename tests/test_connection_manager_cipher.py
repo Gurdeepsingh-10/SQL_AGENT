@@ -54,6 +54,10 @@ def test_cipher_uses_settings_key(monkeypatch):
     # A manager created after the patch uses the new key
     manager_after = ConnectionManager()
 
+    # only a manager that actually uses settings.CONNECTION_ENCRYPTION_KEY can decrypt this
+    ciphertext = Fernet(new_key.encode()).encrypt(plain_url.encode()).decode()
+    assert manager_after.decrypt_connection_url(ciphertext) == plain_url
+
     # It cannot decrypt ciphertext produced by the old key
     with pytest.raises(InvalidToken):
         manager_after.decrypt_connection_url(cipher_before)
