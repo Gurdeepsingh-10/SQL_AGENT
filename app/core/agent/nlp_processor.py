@@ -206,7 +206,7 @@ class NLPProcessor:
     def __init__(self):
         self.client = Groq(api_key=settings.GROQ_API_KEY)
         self.model = settings.GROQ_MODEL
-        self.fast_model = getattr(settings, 'GROQ_FAST_MODEL', 'llama-3.1-8b-instant')
+        self.fast_model = settings.GROQ_FAST_MODEL or settings.GROQ_MODEL
 
     def _select_model(self, query: str) -> str:
         """Use the fast 8B model unless the query is clearly complex."""

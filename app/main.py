@@ -13,6 +13,7 @@ from app.database import init_db
 from app.core.middleware import log_requests_middleware, error_handler_middleware, setup_cors
 from app.api.routes import auth, agent, database, connections, dashboard, agent_streaming
 from app.utils.logger import get_logger
+from app.utils.redact import redact_database_url
 
 # ── Rate Limiting ─────────────────────────────────────────────────────────
 try:
@@ -88,7 +89,7 @@ async def startup_event():
         logger.error(f"Error warming up db pool: {str(e)}")
     
     # Log configuration
-    logger.info(f"Database URL: {settings.DATABASE_URL}")
+    logger.info(f"Database URL: {redact_database_url(settings.DATABASE_URL)}")
     logger.info(f"Debug mode: {settings.DEBUG}")
     logger.info(f"Write operations enabled: {settings.ENABLE_WRITE_OPERATIONS}")
     logger.info(f"Delete operations enabled: {settings.ENABLE_DELETE_OPERATIONS}")
