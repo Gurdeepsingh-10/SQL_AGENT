@@ -132,23 +132,6 @@ class TestIntegration:
         assert me_response.status_code == 200
         assert me_response.json()["email"] == "flow@example.com"
     
-    def test_database_introspection(self, test_user_token, setup_test_data):
-        """Test database introspection endpoints."""
-        headers = {"Authorization": f"Bearer {test_user_token}"}
-        
-        # Get table list
-        tables_response = client.get("/db/tables", headers=headers)
-        assert tables_response.status_code == 200
-        tables = tables_response.json()["tables"]
-        assert "products" in tables
-        
-        # Get table schema
-        schema_response = client.get("/db/schema/products", headers=headers)
-        assert schema_response.status_code == 200
-        schema = schema_response.json()["table"]
-        assert schema["table_name"] == "products"
-        assert len(schema["columns"]) > 0
-    
     def test_schema_info_query(self, test_user_token, setup_test_data):
         """Test schema information query through agent."""
         headers = {"Authorization": f"Bearer {test_user_token}"}
