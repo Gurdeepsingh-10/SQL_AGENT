@@ -187,70 +187,6 @@ curl -X GET "$API_URL/agent/history?limit=20&offset=20" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-## Database Introspection Examples
-
-### 14. List All Tables
-
-```bash
-curl -X GET "$API_URL/db/tables" \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-**Response:**
-```json
-{
-  "tables": ["users", "products", "orders", "order_items"],
-  "total": 4
-}
-```
-
-### 15. Get Table Schema
-
-```bash
-curl -X GET "$API_URL/db/schema/products" \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-**Response:**
-```json
-{
-  "table": {
-    "table_name": "products",
-    "columns": [
-      {
-        "name": "id",
-        "type": "INTEGER",
-        "nullable": false,
-        "primary_key": true,
-        "foreign_key": null
-      },
-      {
-        "name": "name",
-        "type": "VARCHAR(255)",
-        "nullable": false,
-        "primary_key": false,
-        "foreign_key": null
-      },
-      {
-        "name": "price",
-        "type": "DECIMAL(10,2)",
-        "nullable": false,
-        "primary_key": false,
-        "foreign_key": null
-      }
-    ],
-    "row_count": 25
-  }
-}
-```
-
-### 16. Refresh Schema Cache
-
-```bash
-curl -X POST "$API_URL/db/schema/refresh" \
-  -H "Authorization: Bearer $TOKEN"
-```
-
 ## Python Client Example
 
 ```python
@@ -290,14 +226,6 @@ class SQLAgentClient:
         headers = {"Authorization": f"Bearer {self.token}"}
         response = requests.get(
             f"{self.base_url}/agent/history?limit={limit}",
-            headers=headers
-        )
-        return response.json()
-    
-    def get_tables(self):
-        headers = {"Authorization": f"Bearer {self.token}"}
-        response = requests.get(
-            f"{self.base_url}/db/tables",
             headers=headers
         )
         return response.json()

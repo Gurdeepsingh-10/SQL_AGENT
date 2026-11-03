@@ -11,7 +11,7 @@ from sqlalchemy import text
 from app.config import settings
 from app.database import init_db
 from app.core.middleware import log_requests_middleware, error_handler_middleware, setup_cors
-from app.api.routes import auth, agent, database, connections, dashboard, agent_streaming
+from app.api.routes import auth, agent, connections, dashboard
 from app.utils.logger import get_logger
 from app.utils.redact import redact_database_url
 
@@ -53,8 +53,6 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 # Include routers
 app.include_router(auth.router)
 app.include_router(agent.router)
-app.include_router(agent_streaming.router)
-app.include_router(database.router)
 app.include_router(connections.router)  # Already has /connections prefix
 app.include_router(dashboard.router, prefix="/dashboard", tags=["Dashboard"])
 
