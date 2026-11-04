@@ -56,3 +56,34 @@ def pytest_sessionfinish(session, exitstatus):
     if "app.database" in sys.modules:
         sys.modules["app.database"].engine.dispose()
     shutil.rmtree(_TEST_TEMP_DIR, ignore_errors=True)
+
+
+@pytest.fixture
+def client(tmp_path):
+    """Fresh SQLite database and TestClient for every test; nothing is written to the repo."""
+    from fastapi.testclient import TestClient
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from app.main import app
+    from app.database import Base, get_db
+
+    db_file = tmp_path / "test.db"
+    engine = create_engine(
+        f"sqlite:///{db_file.as_posix()}", connect_args={"check_same_thread": False}
+    )
+    Base.metadata.create_all(bind=engine)
+    testing_session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+    def override_get_db():
+        db = testing_session()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        yield TestClient(app)
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        engine.dispose()
